@@ -234,7 +234,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         public void accept(final Runnable pRunnable)
         {
             // san - Dec 9, 2018 3:07:07 PM : discard if shutting down
-            if(!TaggedThreadPoolExecutor.this.isShutdown()) throw new RejectedExecutionException(MessageFormat.format("Task {0} rejected from {1}", pRunnable, this));
+            if(!isShutdown()) throw new RejectedExecutionException(MessageFormat.format("Task {0} rejected from {1}", pRunnable, this));
         }
     }
     public class CallerRun implements Consumer<Runnable>
@@ -243,7 +243,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         public void accept(final Runnable pRunnable)
         {
             // san - Dec 9, 2018 3:07:07 PM : discard if shutting down
-            if(!TaggedThreadPoolExecutor.this.isShutdown()) pRunnable.run();
+            if(!isShutdown()) pRunnable.run();
         }
     }
     public class DiscardOldest implements Consumer<Runnable>
@@ -255,13 +255,13 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
             try
             {
                 // san - Dec 9, 2018 3:07:07 PM : discard if shutting down
-                if(!TaggedThreadPoolExecutor.this.shutdown)
+                if(!shutdown)
                 {
                     // san - Dec 9, 2018 3:04:01 PM : remove oldest
                     if(submittedTasks.size() >= queueCapacity) submittedTasks.remove(0);
 
                     // san - Dec 9, 2018 3:04:08 PM : retry insertion
-                    TaggedThreadPoolExecutor.this.executeOrQueue(pRunnable);
+                    executeOrQueue(pRunnable);
                 }
             }
             finally
