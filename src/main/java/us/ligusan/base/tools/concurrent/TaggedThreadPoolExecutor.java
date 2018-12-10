@@ -2,10 +2,8 @@ package us.ligusan.base.tools.concurrent;
 
 import java.text.MessageFormat;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.Callable;
 import java.util.concurrent.RejectedExecutionException;
@@ -16,6 +14,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
+import org.apache.commons.collections4.Bag;
+import org.apache.commons.collections4.bag.HashBag;
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import us.ligusan.base.tools.collections.FullBlockingQueue;
 
@@ -33,7 +33,8 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     private final ThreadPoolExecutor executor;
     private volatile Consumer<Runnable> rejectionHandler;
 
-    private final Set<T> runningTags;
+    // san - Dec 10, 2018 2:34:20 PM : counting set
+    private final Bag<T> runningTags;
     private final List<Runnable> submittedTasks;
     private volatile boolean shutdown;
     
@@ -47,7 +48,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         executor = new ThreadPoolExecutor(1, pMaxNumberOfThreads, pKeepAliveTime, pTimeUnit, new FullBlockingQueue<>(), pThreadFactory);
         rejectionHandler = new Abort();
 
-        runningTags = new HashSet<>(pMaxNumberOfThreads);
+        runningTags = new HashBag<>();
         submittedTasks = new ArrayList<>();
         
         lock = new ReentrantLock();
@@ -152,11 +153,12 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
      */
     protected boolean executeOrQueue(final Runnable pCommand)
     {
-        T lTag = getTag(pCommand);
+        T lTagToExecute = getTag(pCommand);
         // san - Dec 10, 2018 2:22:33 PM : execute
-        if(!runningTags.contains(lTag) && runningTags.size() < executor.getMaximumPoolSize())
+        // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
+        if((lTagToExecute == null || !runningTags.contains(lTagToExecute)) && runningTags.size() < executor.getMaximumPoolSize())
         {
-            runningTags.add(lTag);
+            runningTags.add(lTagToExecute);
 
             executor.execute(() -> {
                 try
@@ -168,12 +170,15 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
                     lock.lock();
                     try
                     {
-                        runningTags.remove(lTag);
+                        // san - Dec 10, 2018 2:37:58 PM : there may be many nulls - remove only one
+                        runningTags.remove(lTagToExecute, 1);
 
                         for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
                         {
                             Runnable lRunnable = lIterator.next();
-                            if(!runningTags.contains(getTag(lRunnable)))
+                            T lQueuedTag = getTag(lRunnable);
+                            // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
+                            if(lQueuedTag == null || !runningTags.contains(lQueuedTag))
                             {
                                 lIterator.remove();
 
