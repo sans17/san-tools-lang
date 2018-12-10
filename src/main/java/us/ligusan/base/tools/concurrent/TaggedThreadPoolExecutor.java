@@ -17,8 +17,6 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import org.apache.commons.lang3.builder.ToStringBuilder;
-import org.apache.commons.lang3.tuple.ImmutablePair;
-import org.apache.commons.lang3.tuple.Pair;
 import us.ligusan.base.tools.collections.FullBlockingQueue;
 
 /**
@@ -36,8 +34,8 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     private volatile Consumer<Runnable> rejectionHandler;
 
     private final Set<T> runningTags;
-    private final List<Pair<Runnable, T>> submittedTasks;
-    private boolean shutdown;
+    private final List<Runnable> submittedTasks;
+    private volatile boolean shutdown;
     
     private final Lock lock;
 
@@ -66,13 +64,13 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     @Override
     public String toString()
     {
-        ToStringBuilder lToStringBuilder =
-            new ToStringBuilder(this).appendSuper(super.toString()).append("queueCapacity", queueCapacity).append("rejectionHandler", rejectionHandler).append("lock", lock);
+        ToStringBuilder lToStringBuilder = new ToStringBuilder(this).appendSuper(super.toString()).append("queueCapacity", queueCapacity).append("executor", executor)
+            .append("rejectionHandler", rejectionHandler).append("shutdown", shutdown).append("lock", lock);
 
         lock.lock();
         try
         {
-            lToStringBuilder.append("executor", executor).append("runningTags", runningTags).append("submittedTasks", submittedTasks).append("shutdown", shutdown);
+            lToStringBuilder.append("runningTags", runningTags).append("submittedTasks", submittedTasks);
         }
         finally
         {
@@ -80,6 +78,15 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         }
 
         return lToStringBuilder.toString();
+    }
+
+    /*
+     * Should be executed under lock.
+     */
+    protected void tryShutdown()
+    {
+        // san - Dec 10, 2018 2:11:24 PM : nothing is running - shutdown executor
+        if(runningTags.isEmpty()) executor.shutdown();
     }
 
     @Override
@@ -90,6 +97,8 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         {
             shutdown = true;
             // san - Dec 8, 2018 5:52:46 PM : submitted tasks should go through
+
+            tryShutdown();
         }
         finally
         {
@@ -106,8 +115,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
             ArrayList<Runnable> ret = new ArrayList<Runnable>(executor.shutdownNow());
 
-            for(Pair<Runnable, T> lPair : submittedTasks)
-                ret.add(lPair.getKey());
+            ret.addAll(submittedTasks);
             submittedTasks.clear();
 
             return ret;
@@ -120,15 +128,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     @Override
     public boolean isShutdown()
     {
-        lock.lock();
-        try
-        {
-            return shutdown;
-        }
-        finally
-        {
-            lock.unlock();
-        }
+        return shutdown;
     }
     @Override
     public boolean isTerminated()
@@ -153,6 +153,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     protected boolean executeOrQueue(final Runnable pCommand)
     {
         T lTag = getTag(pCommand);
+        // san - Dec 10, 2018 2:22:33 PM : execute
         if(!runningTags.contains(lTag) && runningTags.size() < executor.getMaximumPoolSize())
         {
             runningTags.add(lTag);
@@ -169,22 +170,22 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
                     {
                         runningTags.remove(lTag);
 
-                        for(Iterator<Pair<Runnable, T>> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
+                        for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
                         {
-                            Pair<Runnable, T> lPair = lIterator.next();
-                            if(!runningTags.contains(lPair.getValue()))
+                            Runnable lRunnable = lIterator.next();
+                            if(!runningTags.contains(getTag(lRunnable)))
                             {
                                 lIterator.remove();
 
                                 // san - Dec 8, 2018 7:34:26 PM : bypassing shutdown check
-                                executeOrQueue(lPair.getKey());
+                                executeOrQueue(lRunnable);
 
                                 break;
                             }
                         }
 
-                        // san - Dec 9, 2018 1:02:39 PM : all submitted, time to shutdown
-                        if(shutdown && submittedTasks.isEmpty()) executor.shutdown();
+                        // san - Dec 9, 2018 1:02:39 PM : check if it is time to shutdown
+                        if(shutdown) tryShutdown();
                     }
                     finally
                     {
@@ -193,7 +194,9 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
                 }
             });
         }
-        else if(submittedTasks.size() < queueCapacity) submittedTasks.add(new ImmutablePair<>(pCommand, lTag));
+        // san - Dec 10, 2018 2:22:50 PM : or queue
+        else if(submittedTasks.size() < queueCapacity) submittedTasks.add(pCommand);
+        // san - Dec 10, 2018 2:21:55 PM : will need to reject
         else return false;
 
         return true;
@@ -236,7 +239,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         public void accept(final Runnable pRunnable)
         {
             // san - Dec 9, 2018 3:07:07 PM : discard if shutting down
-            if(!isShutdown()) throw new RejectedExecutionException(MessageFormat.format("Task {0} rejected from {1}", pRunnable, this));
+            if(!shutdown) throw new RejectedExecutionException(MessageFormat.format("Task {0} rejected from {1}", pRunnable, this));
         }
     }
     public class CallerRun implements Consumer<Runnable>
@@ -245,7 +248,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         public void accept(final Runnable pRunnable)
         {
             // san - Dec 9, 2018 3:07:07 PM : discard if shutting down
-            if(!isShutdown()) pRunnable.run();
+            if(!shutdown) pRunnable.run();
         }
     }
     public class DiscardOldest implements Consumer<Runnable>
