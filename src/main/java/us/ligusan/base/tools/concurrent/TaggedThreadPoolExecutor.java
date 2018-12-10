@@ -143,6 +143,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
     protected T getTag(final Object pTagged)
     {
+        // san - Dec 9, 2018 9:37:58 PM : it does not really matter what T is - jvm will strip it out
         return pTagged instanceof Tagged ? (T)((Tagged)pTagged).getTag() : null;
     }
 
