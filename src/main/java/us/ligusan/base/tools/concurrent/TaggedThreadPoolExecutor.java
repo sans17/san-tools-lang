@@ -214,6 +214,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         }
 
         // san - Dec 8, 2018 7:50:26 PM : special handling if queue is full
+        // san - Dec 9, 2018 9:33:26 PM : lock is released here, so it is possible that execution order will be different from submission order with some handlers. I guess, it is the same with ThreadPoolExecutor 
         if(!lAdded) rejectionHandler.accept(pCommand);
     }
 
