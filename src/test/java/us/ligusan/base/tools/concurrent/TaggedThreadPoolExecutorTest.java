@@ -1,6 +1,7 @@
 package us.ligusan.base.tools.concurrent;
 
 import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -33,7 +34,7 @@ public class TaggedThreadPoolExecutorTest
     @BeforeEach
     void setUp() throws Exception
     {
-        TaggedThreadPoolExecutor<String> lExecutorUnderTest = new TaggedThreadPoolExecutor<>(2, 2, 5, TimeUnit.MINUTES, Executors.defaultThreadFactory());
+        TaggedThreadPoolExecutor<String> lExecutorUnderTest = new TaggedThreadPoolExecutor<>(2, 2, 10, TimeUnit.SECONDS, Executors.defaultThreadFactory());
         lExecutorUnderTest.setRejectionHandler(lExecutorUnderTest.new DiscardOldest());
         setExecutorUnderTest(lExecutorUnderTest);
     }
@@ -63,12 +64,15 @@ public class TaggedThreadPoolExecutorTest
                 }
                 System.out.println("1");
             }, null, "1"));
-            //            lLogger.log(Level.INFO, "future={0}", lFuture);
+            //            lLogger.log(Level.INFO, "executorUnderTest={0}", lExecutorUnderTest);
         }
         for(int i = 0; i < 5; i++)
-            lExecutorUnderTest.execute(new TaggedFutureTask<String, String>(() -> {
-                System.out.println("null");
-            }, null, null));
+        {
+            lExecutorUnderTest.execute(() -> System.out.println("null"));
+            //            lLogger.log(Level.INFO, "executorUnderTest={0}", lExecutorUnderTest);
+        }
+
+        lLogger.log(Level.INFO, "executorUnderTest={0}", lExecutorUnderTest);
 
         try
         {
