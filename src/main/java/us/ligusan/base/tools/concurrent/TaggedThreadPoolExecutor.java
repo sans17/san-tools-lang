@@ -148,12 +148,54 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         return pTagged instanceof Tagged ? (T)((Tagged)pTagged).getTag() : null;
     }
 
+    /**
+     * @return either next Runnable to execute in the same thread, or null.
+     */
+    protected Runnable nextRunnable(final T pCurrentTag, final boolean pFromQueue)
+    {
+        lock.lock();
+        try
+        {
+            // san - Dec 10, 2018 2:37:58 PM : there may be many nulls - remove only one
+            runningTags.remove(pCurrentTag, 1);
+
+            Runnable ret = null;
+
+            if(pFromQueue) for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
+            {
+                Runnable lRunnable = lIterator.next();
+                T lQueuedTag = getTag(lRunnable);
+                // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
+                if(lQueuedTag == null || !runningTags.contains(lQueuedTag))
+                {
+                    lIterator.remove();
+
+                    ret = lRunnable;
+
+                    // san - Dec 8, 2018 7:34:26 PM : will be running in the same thread
+                    runningTags.add(lQueuedTag);
+
+                    break;
+                }
+            }
+
+            // san - Dec 9, 2018 1:02:39 PM : check if it is time to shutdown
+            if(shutdown) tryShutdown();
+
+            return ret;
+        }
+        finally
+        {
+            lock.unlock();
+        }
+    }
+
     /*
      * Should be executed under lock.
      */
-    protected boolean executeOrQueue(final Runnable pCommand)
+    protected boolean executeOrQueue(final Runnable pRunnable)
     {
-        T lTagToExecute = getTag(pCommand);
+        T lTagToExecute = getTag(pRunnable);
         // san - Dec 10, 2018 2:22:33 PM : execute
         // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
         if((lTagToExecute == null || !runningTags.contains(lTagToExecute)) && runningTags.size() < executor.getMaximumPoolSize())
@@ -161,46 +203,20 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
             runningTags.add(lTagToExecute);
 
             executor.execute(() -> {
-                try
-                {
-                    pCommand.run();
-                }
-                finally
-                {
-                    lock.lock();
+                Throwable lThrowable = null;
+                for(Runnable lRunnable = pRunnable; lRunnable != null; lRunnable = nextRunnable(getTag(lRunnable), lThrowable == null))
                     try
                     {
-                        // san - Dec 10, 2018 2:37:58 PM : there may be many nulls - remove only one
-                        runningTags.remove(lTagToExecute, 1);
-
-                        for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
-                        {
-                            Runnable lRunnable = lIterator.next();
-                            T lQueuedTag = getTag(lRunnable);
-                            // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
-                            if(lQueuedTag == null || !runningTags.contains(lQueuedTag))
-                            {
-                                lIterator.remove();
-
-                                // san - Dec 8, 2018 7:34:26 PM : bypassing shutdown check
-                                executeOrQueue(lRunnable);
-
-                                break;
-                            }
-                        }
-
-                        // san - Dec 9, 2018 1:02:39 PM : check if it is time to shutdown
-                        if(shutdown) tryShutdown();
+                        lRunnable.run();
                     }
-                    finally
+                    catch(Throwable t)
                     {
-                        lock.unlock();
+                        lThrowable = t;
                     }
-                }
             });
         }
         // san - Dec 10, 2018 2:22:50 PM : or queue
-        else if(submittedTasks.size() < queueCapacity) submittedTasks.add(pCommand);
+        else if(submittedTasks.size() < queueCapacity) submittedTasks.add(pRunnable);
         // san - Dec 10, 2018 2:21:55 PM : will need to reject
         else return false;
 

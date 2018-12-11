@@ -1,7 +1,6 @@
 package us.ligusan.base.tools.concurrent;
 
 import java.lang.System.Logger;
-import java.lang.System.Logger.Level;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -48,13 +47,15 @@ public class TaggedThreadPoolExecutorTest
     {
         Logger lLogger = System.getLogger(getClass().getName());
 
+        TaggedThreadPoolExecutor<String> lExecutorUnderTest = getExecutorUnderTest();
+
         Future<?> lFuture = null;
         for(int i = 0; i < 5; i++)
         {
-            lFuture = getExecutorUnderTest().submit(new TaggedFutureTask<String, String>(() -> {
+            lFuture = lExecutorUnderTest.submit(new TaggedFutureTask<String, String>(() -> {
                 try
                 {
-                    Thread.currentThread().sleep(1_000);
+                    Thread.currentThread().sleep(10_000);
                 }
                 catch(InterruptedException e)
                 {
@@ -62,11 +63,12 @@ public class TaggedThreadPoolExecutorTest
                 }
                 System.out.println("1");
             }, null, "1"));
-            lLogger.log(Level.INFO, "future={0}", lFuture);
+            //            lLogger.log(Level.INFO, "future={0}", lFuture);
         }
-        getExecutorUnderTest().execute(new TaggedFutureTask<String, String>(() -> {
-            System.out.println("2");
-        }, null, "2"));
+        for(int i = 0; i < 5; i++)
+            lExecutorUnderTest.execute(new TaggedFutureTask<String, String>(() -> {
+                System.out.println("null");
+            }, null, null));
 
         try
         {
