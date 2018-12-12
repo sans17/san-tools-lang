@@ -276,15 +276,14 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
             {
                 // san - Dec 9, 2018 3:04:01 PM : remove oldest
                 if(submittedTasks.size() >= queueCapacity) submittedTasks.remove(0);
+
+                // san - Dec 9, 2018 3:04:08 PM : retry under lock so that nobody takes our place in queue
+                execute(pRunnable);
             }
             finally
             {
                 lock.unlock();
             }
-
-            // TODO san - Dec 11, 2018 9:37:53 PM accept : we have a recursion here?
-            // san - Dec 9, 2018 3:04:08 PM : retry
-            execute(pRunnable);
         }
     }
     public static class Discard implements Consumer<Runnable>
