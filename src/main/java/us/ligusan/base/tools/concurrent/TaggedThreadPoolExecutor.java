@@ -14,8 +14,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
-import org.apache.commons.collections4.Bag;
-import org.apache.commons.collections4.bag.HashBag;
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import us.ligusan.base.tools.collections.FullBlockingQueue;
 
@@ -33,8 +31,8 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     private final ThreadPoolExecutor executor;
     private volatile Consumer<Runnable> rejectionHandler;
 
-    // san - Dec 10, 2018 2:34:20 PM : counting set
-    private final Bag<T> runningTags;
+    // san - Dec 11, 2018 8:11:04 PM : use list in case we have the same runnable twice
+    private final List<Runnable> runningTasks;
     private final List<Runnable> submittedTasks;
     private volatile boolean shutdown;
     
@@ -48,7 +46,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         executor = new ThreadPoolExecutor(1, pMaxNumberOfThreads, pKeepAliveTime, pTimeUnit, new FullBlockingQueue<>(), pThreadFactory);
         rejectionHandler = new Abort();
 
-        runningTags = new HashBag<>();
+        runningTasks = new ArrayList<>();
         submittedTasks = new ArrayList<>();
         
         lock = new ReentrantLock();
@@ -71,7 +69,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         lock.lock();
         try
         {
-            lToStringBuilder.append("runningTags", runningTags).append("submittedTasks", submittedTasks);
+            lToStringBuilder.append("runningTasks", runningTasks).append("submittedTasks", submittedTasks);
         }
         finally
         {
@@ -87,7 +85,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     protected void tryShutdown()
     {
         // san - Dec 10, 2018 2:11:24 PM : nothing is running - shutdown executor
-        if(runningTags.isEmpty()) executor.shutdown();
+        if(runningTasks.isEmpty()) executor.shutdown();
     }
 
     @Override
@@ -148,46 +146,17 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         return pTagged instanceof Tagged ? (T)((Tagged)pTagged).getTag() : null;
     }
 
-    /**
-     * @return either next Runnable to execute in the same thread, or null.
+    /*
+     * Should be executed under lock.
      */
-    protected Runnable nextRunnable(final T pCurrentTag, final boolean pFromQueue)
+    protected boolean isRunningTag(final Runnable pRunnable)
     {
-        lock.lock();
-        try
-        {
-            // san - Dec 10, 2018 2:37:58 PM : there may be many nulls - remove only one
-            runningTags.remove(pCurrentTag, 1);
+        T lTag = getTag(pRunnable);
 
-            Runnable ret = null;
+        if(lTag != null) for(Runnable lRunnable : runningTasks)
+            if(lTag.equals(getTag(lRunnable))) return true;
 
-            if(pFromQueue) for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
-            {
-                Runnable lRunnable = lIterator.next();
-                T lQueuedTag = getTag(lRunnable);
-                // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
-                if(lQueuedTag == null || !runningTags.contains(lQueuedTag))
-                {
-                    lIterator.remove();
-
-                    ret = lRunnable;
-
-                    // san - Dec 8, 2018 7:34:26 PM : will be running in the same thread
-                    runningTags.add(lQueuedTag);
-
-                    break;
-                }
-            }
-
-            // san - Dec 9, 2018 1:02:39 PM : check if it is time to shutdown
-            if(shutdown) tryShutdown();
-
-            return ret;
-        }
-        finally
-        {
-            lock.unlock();
-        }
+        return false;
     }
 
     /*
@@ -195,23 +164,52 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
      */
     protected boolean executeOrQueue(final Runnable pRunnable)
     {
-        T lTagToExecute = getTag(pRunnable);
         // san - Dec 10, 2018 2:22:33 PM : execute
         // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
-        if((lTagToExecute == null || !runningTags.contains(lTagToExecute)) && runningTags.size() < executor.getMaximumPoolSize())
+        if(!isRunningTag(pRunnable) && runningTasks.size() < executor.getMaximumPoolSize())
         {
-            runningTags.add(lTagToExecute);
+            runningTasks.add(pRunnable);
 
             executor.execute(() -> {
-                Throwable lThrowable = null;
-                for(Runnable lRunnable = pRunnable; lRunnable != null; lRunnable = nextRunnable(getTag(lRunnable), lThrowable == null))
+                for(Runnable lRunnableToExecute = pRunnable; lRunnableToExecute != null;)
                     try
                     {
-                        lRunnable.run();
+                        lRunnableToExecute.run();
                     }
                     catch(Throwable t)
                     {
-                        lThrowable = t;
+                        // san - Dec 11, 2018 7:10:00 PM : yep - I just swallowed a Throwable from a Runnable
+                    }
+                    finally
+                    {
+                        lock.lock();
+                        try
+                        {
+                            runningTasks.remove(lRunnableToExecute);
+
+                            lRunnableToExecute = null;
+
+                            for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
+                            {
+                                Runnable lQueuedRunnable = lIterator.next();
+                                if(!isRunningTag(lQueuedRunnable))
+                                {
+                                    // san - Dec 8, 2018 7:34:26 PM : will be running in the same thread
+                                    runningTasks.add(lRunnableToExecute = lQueuedRunnable);
+
+                                    lIterator.remove();
+
+                                    break;
+                                }
+                            }
+
+                            // san - Dec 9, 2018 1:02:39 PM : check if it is time to shutdown
+                            if(shutdown) tryShutdown();
+                        }
+                        finally
+                        {
+                            lock.unlock();
+                        }
                     }
             });
         }
