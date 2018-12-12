@@ -112,11 +112,10 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         {
             shutdown = true;
 
-            ArrayList<Runnable> ret = new ArrayList<Runnable>(executor.shutdownNow());
+            executor.shutdownNow();
 
-            ret.addAll(submittedTasks);
+            ArrayList<Runnable> ret = new ArrayList<Runnable>(submittedTasks);
             submittedTasks.clear();
-
             return ret;
         }
         finally
@@ -149,14 +148,18 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     /*
      * Should be executed under lock.
      */
-    protected boolean isRunningTag(final Runnable pRunnable)
+    protected boolean addToRunning(final Runnable pRunnable)
     {
+        if(runningTasks.size() < executor.getMaximumPoolSize()) return false;
+
         T lTag = getTag(pRunnable);
-
+        // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
         if(lTag != null) for(Runnable lRunnable : runningTasks)
-            if(lTag.equals(getTag(lRunnable))) return true;
+            if(lTag.equals(getTag(lRunnable))) return false;
 
-        return false;
+        runningTasks.add(pRunnable);
+
+        return true;
     }
 
     /*
@@ -165,11 +168,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     protected boolean executeOrQueue(final Runnable pRunnable)
     {
         // san - Dec 10, 2018 2:22:33 PM : execute
-        // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
-        if(!isRunningTag(pRunnable) && runningTasks.size() < executor.getMaximumPoolSize())
-        {
-            runningTasks.add(pRunnable);
-
+        if(addToRunning(pRunnable))
             executor.execute(() -> {
                 for(Runnable lRunnableToExecute = pRunnable; lRunnableToExecute != null;)
                     try
@@ -192,10 +191,10 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
                             for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
                             {
                                 Runnable lQueuedRunnable = lIterator.next();
-                                if(!isRunningTag(lQueuedRunnable))
+                                if(addToRunning(lQueuedRunnable))
                                 {
                                     // san - Dec 8, 2018 7:34:26 PM : will be running in the same thread
-                                    runningTasks.add(lRunnableToExecute = lQueuedRunnable);
+                                    lRunnableToExecute = lQueuedRunnable;
 
                                     lIterator.remove();
 
@@ -212,7 +211,6 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
                         }
                     }
             });
-        }
         // san - Dec 10, 2018 2:22:50 PM : or queue
         else if(submittedTasks.size() < queueCapacity) submittedTasks.add(pRunnable);
         // san - Dec 10, 2018 2:21:55 PM : will need to reject
