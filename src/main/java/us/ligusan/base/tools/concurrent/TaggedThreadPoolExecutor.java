@@ -79,49 +79,53 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         return lToStringBuilder.toString();
     }
 
-    /*
-     * Should be executed under lock.
-     */
     protected void tryShutdown()
     {
+        boolean lShutdown = true;
+
+        lock.lock();
+        try
+        {
+            lShutdown = runningTasks.isEmpty();
+        }
+        finally
+        {
+            lock.unlock();
+        }
+
         // san - Dec 10, 2018 2:11:24 PM : nothing is running - shutdown executor
-        if(runningTasks.isEmpty()) executor.shutdown();
+        if(lShutdown) executor.shutdown();
     }
 
     @Override
     public void shutdown()
     {
-        lock.lock();
-        try
-        {
-            shutdown = true;
-            // san - Dec 8, 2018 5:52:46 PM : submitted tasks should go through
+        shutdown = true;
+        // san - Dec 8, 2018 5:52:46 PM : submitted tasks should go through
 
-            tryShutdown();
-        }
-        finally
-        {
-            lock.unlock();
-        }
+        tryShutdown();
     }
     @Override
     public List<Runnable> shutdownNow()
     {
+        shutdown = true;
+
+        ArrayList<Runnable> ret = null;
+
         lock.lock();
         try
         {
-            shutdown = true;
-
-            executor.shutdownNow();
-
-            ArrayList<Runnable> ret = new ArrayList<Runnable>(submittedTasks);
+            ret = new ArrayList<Runnable>(submittedTasks);
             submittedTasks.clear();
-            return ret;
         }
         finally
         {
             lock.unlock();
         }
+
+        executor.shutdownNow();
+
+        return ret;
     }
     @Override
     public boolean isShutdown()
@@ -145,32 +149,36 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         return pTagged instanceof Tagged ? (T)((Tagged)pTagged).getTag() : null;
     }
 
-    /*
-     * Should be executed under lock.
-     */
     protected boolean addToRunning(final Runnable pRunnable)
     {
-        if(runningTasks.size() < executor.getMaximumPoolSize()) return false;
+        lock.lock();
+        try
+        {
+            if(runningTasks.size() >= executor.getMaximumPoolSize()) return false;
 
-        T lTag = getTag(pRunnable);
-        // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
-        if(lTag != null) for(Runnable lRunnable : runningTasks)
-            if(lTag.equals(getTag(lRunnable))) return false;
+            T lTag = getTag(pRunnable);
+            // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
+            if(lTag != null) for(Runnable lRunnable : runningTasks)
+                if(lTag.equals(getTag(lRunnable))) return false;
 
-        runningTasks.add(pRunnable);
+            runningTasks.add(pRunnable);
+        }
+        finally
+        {
+            lock.unlock();
+        }
 
         return true;
     }
 
-    /*
-     * Should be executed under lock.
-     */
-    protected boolean executeOrQueue(final Runnable pRunnable)
+    @Override
+    public void execute(final Runnable pCommand)
     {
-        // san - Dec 10, 2018 2:22:33 PM : execute
-        if(addToRunning(pRunnable))
-            executor.execute(() -> {
-                for(Runnable lRunnableToExecute = pRunnable; lRunnableToExecute != null;)
+        // san - Dec 8, 2018 8:01:07 PM : discard if shutting down
+        if(!shutdown)
+            // san - Dec 10, 2018 2:22:33 PM : execute
+            if(addToRunning(pCommand)) executor.execute(() -> {
+                for(Runnable lRunnableToExecute = pCommand; lRunnableToExecute != null;)
                     try
                     {
                         lRunnableToExecute.run();
@@ -201,42 +209,34 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
                                     break;
                                 }
                             }
-
-                            // san - Dec 9, 2018 1:02:39 PM : check if it is time to shutdown
-                            if(shutdown) tryShutdown();
                         }
                         finally
                         {
                             lock.unlock();
                         }
+
+                        // san - Dec 9, 2018 1:02:39 PM : check if it is time to shutdown
+                        if(shutdown) tryShutdown();
                     }
             });
-        // san - Dec 10, 2018 2:22:50 PM : or queue
-        else if(submittedTasks.size() < queueCapacity) submittedTasks.add(pRunnable);
-        // san - Dec 10, 2018 2:21:55 PM : will need to reject
-        else return false;
-
-        return true;
-    }
-    @Override
-    public void execute(final Runnable pCommand)
-    {
-        boolean lAdded = true;
-
-        lock.lock();
-        try
+            else
         {
-            if(!shutdown) lAdded = executeOrQueue(pCommand);
-            // san - Dec 8, 2018 8:01:07 PM : discard if shutting down
-        }
-        finally
-        {
-            lock.unlock();
-        }
+            boolean lQueued = false;
 
-        // san - Dec 8, 2018 7:50:26 PM : special handling if queue is full
-        // san - Dec 9, 2018 9:33:26 PM : lock is released here, so it is possible that execution order will be different from submission order with some handlers. I guess, it is the same with ThreadPoolExecutor 
-        if(!lAdded) rejectionHandler.accept(pCommand);
+            lock.lock();
+            try
+            {
+                // san - Dec 10, 2018 2:22:50 PM : or queue
+                if(lQueued = submittedTasks.size() < queueCapacity) submittedTasks.add(pCommand);
+            }
+            finally
+            {
+                lock.unlock();
+            }
+
+            // san - Dec 8, 2018 7:50:26 PM : special handling if queue is full
+            if(!lQueued) rejectionHandler.accept(pCommand);
+        }
     }
 
     @Override
@@ -255,17 +255,15 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         @Override
         public void accept(final Runnable pRunnable)
         {
-            // san - Dec 9, 2018 3:07:07 PM : discard if shutting down
-            if(!shutdown) throw new RejectedExecutionException(MessageFormat.format("Task {0} rejected from {1}", pRunnable, this));
+            throw new RejectedExecutionException(MessageFormat.format("Task {0} rejected from {1}", pRunnable, TaggedThreadPoolExecutor.this));
         }
     }
-    public class CallerRun implements Consumer<Runnable>
+    public static class CallerRun implements Consumer<Runnable>
     {
         @Override
         public void accept(final Runnable pRunnable)
         {
-            // san - Dec 9, 2018 3:07:07 PM : discard if shutting down
-            if(!shutdown) pRunnable.run();
+            pRunnable.run();
         }
     }
     public class DiscardOldest implements Consumer<Runnable>
@@ -276,20 +274,17 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
             lock.lock();
             try
             {
-                // san - Dec 9, 2018 3:07:07 PM : discard if shutting down
-                if(!shutdown)
-                {
-                    // san - Dec 9, 2018 3:04:01 PM : remove oldest
-                    if(submittedTasks.size() >= queueCapacity) submittedTasks.remove(0);
-
-                    // san - Dec 9, 2018 3:04:08 PM : retry insertion
-                    executeOrQueue(pRunnable);
-                }
+                // san - Dec 9, 2018 3:04:01 PM : remove oldest
+                if(submittedTasks.size() >= queueCapacity) submittedTasks.remove(0);
             }
             finally
             {
                 lock.unlock();
             }
+
+            // TODO san - Dec 11, 2018 9:37:53 PM accept : we have a recursion here?
+            // san - Dec 9, 2018 3:04:08 PM : retry
+            execute(pRunnable);
         }
     }
     public static class Discard implements Consumer<Runnable>
