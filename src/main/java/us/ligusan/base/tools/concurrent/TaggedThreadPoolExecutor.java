@@ -33,7 +33,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
     // san - Dec 11, 2018 8:11:04 PM : use list in case we have the same runnable twice
     private final List<Runnable> runningTasks;
-    private final List<Runnable> submittedTasks;
+    private List<Runnable> submittedTasks;
     private volatile boolean shutdown;
     
     private final Lock lock;
@@ -110,13 +110,12 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     {
         shutdown = true;
 
-        ArrayList<Runnable> ret = null;
+        List<Runnable> ret = submittedTasks;
 
         lock.lock();
         try
         {
-            ret = new ArrayList<Runnable>(submittedTasks);
-            submittedTasks.clear();
+            submittedTasks = new ArrayList<Runnable>();
         }
         finally
         {
@@ -161,14 +160,12 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
             if(lTag != null) for(Runnable lRunnable : runningTasks)
                 if(lTag.equals(getTag(lRunnable))) return false;
 
-            runningTasks.add(pRunnable);
+            return runningTasks.add(pRunnable);
         }
         finally
         {
             lock.unlock();
         }
-
-        return true;
     }
 
     @Override
@@ -227,7 +224,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
             try
             {
                 // san - Dec 10, 2018 2:22:50 PM : or queue
-                if(lQueued = submittedTasks.size() < queueCapacity) submittedTasks.add(pCommand);
+                lQueued = submittedTasks.size() < queueCapacity && submittedTasks.add(pCommand);
             }
             finally
             {
