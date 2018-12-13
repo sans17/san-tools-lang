@@ -11,8 +11,6 @@ import java.util.concurrent.RunnableFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import us.ligusan.base.tools.collections.FullBlockingQueue;
@@ -33,11 +31,9 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
     // san - Dec 11, 2018 8:11:04 PM : use list in case we have the same runnable twice
     private final List<Runnable> runningTasks;
-    private List<Runnable> submittedTasks;
+    private final List<Runnable> submittedTasks;
     private volatile boolean shutdown;
     
-    private final Lock lock;
-
     public TaggedThreadPoolExecutor(final int pQueueCapacity, final int pMaxNumberOfThreads, final long pKeepAliveTime, final TimeUnit pTimeUnit, final ThreadFactory pThreadFactory)
     {
         if((queueCapacity = pQueueCapacity) <= 0) throw new IllegalArgumentException();
@@ -48,8 +44,6 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
         runningTasks = new ArrayList<>();
         submittedTasks = new ArrayList<>();
-        
-        lock = new ReentrantLock();
     }
 
     public Consumer<Runnable> getRejectionHandler()
@@ -63,34 +57,27 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     @Override
     public String toString()
     {
-        ToStringBuilder lToStringBuilder = new ToStringBuilder(this).appendSuper(super.toString()).append("queueCapacity", queueCapacity).append("executor", executor)
-            .append("rejectionHandler", rejectionHandler).append("shutdown", shutdown).append("lock", lock);
-
-        lock.lock();
-        try
+        ToStringBuilder lToStringBuilder =
+            new ToStringBuilder(this).appendSuper(super.toString()).append("queueCapacity", queueCapacity).append("executor", executor).append("rejectionHandler", rejectionHandler);
+        synchronized(runningTasks)
         {
-            lToStringBuilder.append("runningTasks", runningTasks).append("submittedTasks", submittedTasks);
+            lToStringBuilder.append("runningTasks", runningTasks);
         }
-        finally
+        synchronized(submittedTasks)
         {
-            lock.unlock();
+            lToStringBuilder.append("submittedTasks", submittedTasks);
         }
 
-        return lToStringBuilder.toString();
+        return lToStringBuilder.append("shutdown", shutdown).toString();
     }
 
     protected void tryShutdown()
     {
         boolean lShutdown = true;
 
-        lock.lock();
-        try
+        synchronized(runningTasks)
         {
             lShutdown = runningTasks.isEmpty();
-        }
-        finally
-        {
-            lock.unlock();
         }
 
         // san - Dec 10, 2018 2:11:24 PM : nothing is running - shutdown executor
@@ -110,16 +97,11 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     {
         shutdown = true;
 
-        List<Runnable> ret = submittedTasks;
-
-        lock.lock();
-        try
+        ArrayList<Runnable> ret = null;
+        synchronized(submittedTasks)
         {
-            submittedTasks = new ArrayList<Runnable>();
-        }
-        finally
-        {
-            lock.unlock();
+            ret = new ArrayList<>(submittedTasks);
+            submittedTasks.clear();
         }
 
         executor.shutdownNow();
@@ -150,8 +132,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
     protected boolean addToRunning(final Runnable pRunnable)
     {
-        lock.lock();
-        try
+        synchronized(runningTasks)
         {
             if(runningTasks.size() >= executor.getMaximumPoolSize()) return false;
 
@@ -162,78 +143,95 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
             return runningTasks.add(pRunnable);
         }
-        finally
+    }
+
+    protected Runnable nextRunning()
+    {
+        synchronized(submittedTasks)
         {
-            lock.unlock();
+            for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
+            {
+                Runnable ret = lIterator.next();
+                if(addToRunning(ret))
+                {
+                    lIterator.remove();
+
+                    return ret;
+                }
+            }
         }
+
+        return null;
+    }
+
+    protected Runnable nextRunning(final Runnable pRunnable)
+    {
+        synchronized(runningTasks)
+        {
+            runningTasks.remove(pRunnable);
+        }
+
+        return nextRunning();
+    }
+
+    protected void passToExecutor(final Runnable pRunnable)
+    {
+        if(pRunnable != null) executor.execute(() -> {
+            for(Runnable lRunnable = pRunnable; lRunnable != null;)
+                try
+                {
+                    lRunnable.run();
+                }
+                catch(Throwable t)
+                {
+                    // san - Dec 11, 2018 7:10:00 PM : yep - I just swallowed a Throwable from a Runnable
+                }
+                finally
+                {
+                    // san - Dec 8, 2018 7:34:26 PM : will be running in the same thread
+                    lRunnable = nextRunning(lRunnable);
+
+                    // san - Dec 9, 2018 1:02:39 PM : check if it is time to shutdown
+                    if(shutdown) tryShutdown();
+                }
+        });
+    }
+
+    protected boolean enqueue(final Runnable pRunnable)
+    {
+        synchronized(submittedTasks)
+        {
+            return submittedTasks.size() < queueCapacity && submittedTasks.add(pRunnable);
+        }
+    }
+
+    protected boolean isDone()
+    {
+        synchronized(runningTasks)
+        {
+            return runningTasks.isEmpty();
+        }
+    }
+
+    protected void tryRunning()
+    {
+        // san - Dec 12, 2018 9:25:07 PM : it is possible that all running tasks are done
+        if(isDone()) passToExecutor(nextRunning());
     }
 
     @Override
     public void execute(final Runnable pCommand)
     {
+        if(pCommand == null) throw new NullPointerException();
+
         // san - Dec 8, 2018 8:01:07 PM : discard if shutting down
         if(!shutdown)
             // san - Dec 10, 2018 2:22:33 PM : execute
-            if(addToRunning(pCommand)) executor.execute(() -> {
-                for(Runnable lRunnableToExecute = pCommand; lRunnableToExecute != null;)
-                    try
-                    {
-                        lRunnableToExecute.run();
-                    }
-                    catch(Throwable t)
-                    {
-                        // san - Dec 11, 2018 7:10:00 PM : yep - I just swallowed a Throwable from a Runnable
-                    }
-                    finally
-                    {
-                        lock.lock();
-                        try
-                        {
-                            runningTasks.remove(lRunnableToExecute);
-
-                            lRunnableToExecute = null;
-
-                            for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
-                            {
-                                Runnable lQueuedRunnable = lIterator.next();
-                                if(addToRunning(lQueuedRunnable))
-                                {
-                                    // san - Dec 8, 2018 7:34:26 PM : will be running in the same thread
-                                    lRunnableToExecute = lQueuedRunnable;
-
-                                    lIterator.remove();
-
-                                    break;
-                                }
-                            }
-                        }
-                        finally
-                        {
-                            lock.unlock();
-                        }
-
-                        // san - Dec 9, 2018 1:02:39 PM : check if it is time to shutdown
-                        if(shutdown) tryShutdown();
-                    }
-            });
-            else
-        {
-            boolean lQueued = false;
-
-            lock.lock();
-            try
-            {
-                // san - Dec 10, 2018 2:22:50 PM : or queue
-                lQueued = submittedTasks.size() < queueCapacity && submittedTasks.add(pCommand);
-            }
-            finally
-            {
-                lock.unlock();
-            }
-
+            if(addToRunning(pCommand)) passToExecutor(pCommand);
+            // san - Dec 10, 2018 2:22:50 PM : or queue
+            else if(enqueue(pCommand)) tryRunning();
             // san - Dec 8, 2018 7:50:26 PM : special handling if queue is full
-            if(!lQueued) rejectionHandler.accept(pCommand);
-        }
+            else rejectionHandler.accept(pCommand);
     }
 
     @Override
@@ -245,6 +243,16 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     protected <V> RunnableFuture<V> newTaskFor(final Callable<V> pCallable)
     {
         return new TaggedFutureTask<V, T>(pCallable, getTag(pCallable));
+    }
+
+    protected void discardOldest(final Runnable pRunnable)
+    {
+        synchronized(submittedTasks)
+        {
+            // san - Dec 9, 2018 3:04:01 PM : remove oldest
+            if(submittedTasks.size() >= queueCapacity) submittedTasks.remove(0);
+            submittedTasks.add(pRunnable);
+        }
     }
 
     public class Abort implements Consumer<Runnable>
@@ -268,19 +276,9 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         @Override
         public void accept(final Runnable pRunnable)
         {
-            lock.lock();
-            try
-            {
-                // san - Dec 9, 2018 3:04:01 PM : remove oldest
-                if(submittedTasks.size() >= queueCapacity) submittedTasks.remove(0);
+            discardOldest(pRunnable);
 
-                // san - Dec 9, 2018 3:04:08 PM : retry under lock so that nobody takes our place in queue
-                execute(pRunnable);
-            }
-            finally
-            {
-                lock.unlock();
-            }
+            tryRunning();
         }
     }
     public static class Discard implements Consumer<Runnable>
