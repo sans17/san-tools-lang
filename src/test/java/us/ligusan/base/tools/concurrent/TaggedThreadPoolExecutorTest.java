@@ -1,86 +1,81 @@
 package us.ligusan.base.tools.concurrent;
 
-import java.lang.System.Logger;
-import java.lang.System.Logger.Level;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.fail;
+import java.util.Arrays;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.BeforeEach;
+import java.util.concurrent.locks.LockSupport;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 public class TaggedThreadPoolExecutorTest
 {
-    private TaggedThreadPoolExecutor<String> executorUnderTest;
-
-    protected TaggedThreadPoolExecutor<String> getExecutorUnderTest()
-    {
-        return executorUnderTest;
-    }
-
-    protected void setExecutorUnderTest(final TaggedThreadPoolExecutor<String> pExecutorUnderTest)
-    {
-        executorUnderTest = pExecutorUnderTest;
-    }
-
     //    @BeforeAll
     //    static void setUpBeforeClass() throws Exception
     //    {}
-    //
     //    @AfterAll
     //    static void tearDownAfterClass() throws Exception
     //    {}
-
-    @BeforeEach
-    void setUp() throws Exception
-    {
-        TaggedThreadPoolExecutor<String> lExecutorUnderTest = new TaggedThreadPoolExecutor<>(2, 2, 10, TimeUnit.SECONDS, Executors.defaultThreadFactory());
-        lExecutorUnderTest.setRejectionHandler(lExecutorUnderTest.new DiscardOldest());
-        setExecutorUnderTest(lExecutorUnderTest);
-    }
-
+    //    @BeforeEach
+    //    void setUp() throws Exception
+    //    {}
     //    @AfterEach
     //    void tearDown() throws Exception
     //    {}
 
     @Test
-    final void testExecute()
+    final void testExecute1()
     {
-        Logger lLogger = System.getLogger(getClass().getName());
+        CopyOnWriteArrayList<Integer> lResultOfExecution = new CopyOnWriteArrayList<>();
 
-        TaggedThreadPoolExecutor<String> lExecutorUnderTest = getExecutorUnderTest();
+        TaggedThreadPoolExecutor<Integer> lExecutorUnderTest = new TaggedThreadPoolExecutor<>(2, 2, 10, TimeUnit.SECONDS, Executors.defaultThreadFactory());
+        lExecutorUnderTest.setRejectionHandler(lExecutorUnderTest.new DiscardOldest());
 
-        Future<?> lFuture = null;
         for(int i = 0; i < 5; i++)
         {
-            lFuture = lExecutorUnderTest.submit(new TaggedFutureTask<String, String>(() -> {
-                try
-                {
-                    Thread.currentThread().sleep(10_000);
-                }
-                catch(InterruptedException e)
-                {
-                    // TODO san - Dec 8, 2018 8:57:26 PM testExecute : what do we do here?
-                }
-                System.out.println("1");
-            }, null, "1"));
-            //            lLogger.log(Level.INFO, "executorUnderTest={0}", lExecutorUnderTest);
+            int j = i;
+            lExecutorUnderTest.submit(new TaggedFutureTask<Object, Integer>(() -> lResultOfExecution.add(j), null, 1));
         }
+
+        // san - Dec 13, 2018 8:48:05 PM : 0 goes into processing; 1, 2, 3, 4 into queue; 1, 2 are discarded 
+        assertEquals(Arrays.asList(0, 3, 4), lResultOfExecution);
+    }
+
+    @Test
+    final void testExecute2()
+    {
+        CopyOnWriteArrayList<Integer> lResultOfExecution = new CopyOnWriteArrayList<>();
+
+        TaggedThreadPoolExecutor<Integer> lExecutorUnderTest = new TaggedThreadPoolExecutor<>(2, 2, 10, TimeUnit.SECONDS, Executors.defaultThreadFactory());
+
         for(int i = 0; i < 5; i++)
         {
-            lExecutorUnderTest.execute(() -> System.out.println("null"));
-            //            lLogger.log(Level.INFO, "executorUnderTest={0}", lExecutorUnderTest);
+            int j = i;
+            Executable lExecutable = () -> lExecutorUnderTest.submit(new TaggedFutureTask<Object, Integer>(() -> {
+                // san - Dec 13, 2018 9:10:12 PM : 2 seconds sleep
+                LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(2));
+                lResultOfExecution.add(j);
+            }, null, 1));
+
+            if(i > 2) assertThrows(RejectedExecutionException.class, lExecutable);
+            else try
+            {
+                lExecutable.execute();
+            }
+            catch(Throwable t)
+            {
+                fail(t);
+            }
         }
 
-        lLogger.log(Level.INFO, "executorUnderTest={0}", lExecutorUnderTest);
+        // san - Dec 13, 2018 9:12:18 PM : 10 seconds sleep
+        LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(10));
 
-        try
-        {
-            lFuture.get();
-        }
-        catch(Exception e)
-        {
-            Assertions.fail(e);
-        }
+        // san - Dec 13, 2018 8:48:05 PM : 0 goes into processing; 1, 2, 3, 4 into queue; 3, 4 aborted 
+        assertEquals(Arrays.asList(0, 1, 2), lResultOfExecution);
     }
 }
