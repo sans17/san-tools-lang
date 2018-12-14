@@ -3,6 +3,7 @@ package us.ligusan.base.tools.concurrent;
 import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.Callable;
@@ -43,7 +44,8 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         rejectionHandler = new Abort();
 
         runningTasks = new ArrayList<>();
-        submittedTasks = new ArrayList<>();
+        // san - Dec 13, 2018 7:21:33 PM : will be removing a lot from 0 and middle - LinkedList would be better?
+        submittedTasks = new LinkedList<>();
     }
 
     public Consumer<Runnable> getRejectionHandler()
@@ -145,18 +147,25 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         }
     }
 
-    protected Runnable nextRunning()
+    protected Runnable nextRunning(final Runnable pRunnable)
     {
-        synchronized(submittedTasks)
+        // san - Dec 13, 2018 7:25:50 PM : this method requires both locks
+        synchronized(runningTasks)
         {
-            for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
-            {
-                Runnable ret = lIterator.next();
-                if(addToRunning(ret))
-                {
-                    lIterator.remove();
+            // san - Dec 13, 2018 7:19:04 PM : if pRunnable is not null, we execute in pooled thread - addToRunning should happen in the same lock
+            if(pRunnable != null) runningTasks.remove(pRunnable);
 
-                    return ret;
+            synchronized(submittedTasks)
+            {
+                for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
+                {
+                    Runnable ret = lIterator.next();
+                    if(addToRunning(ret))
+                    {
+                        lIterator.remove();
+
+                        return ret;
+                    }
                 }
             }
         }
@@ -164,20 +173,11 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         return null;
     }
 
-    protected Runnable nextRunning(final Runnable pRunnable)
-    {
-        synchronized(runningTasks)
-        {
-            runningTasks.remove(pRunnable);
-        }
-
-        return nextRunning();
-    }
-
     protected void passToExecutor(final Runnable pRunnable)
     {
         if(pRunnable != null) executor.execute(() -> {
-            for(Runnable lRunnable = pRunnable; lRunnable != null;)
+            // san - Dec 8, 2018 7:34:26 PM : will be running in the same thread
+            for(Runnable lRunnable = pRunnable; lRunnable != null; lRunnable = nextRunning(lRunnable))
                 try
                 {
                     lRunnable.run();
@@ -186,14 +186,9 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
                 {
                     // san - Dec 11, 2018 7:10:00 PM : yep - I just swallowed a Throwable from a Runnable
                 }
-                finally
-                {
-                    // san - Dec 8, 2018 7:34:26 PM : will be running in the same thread
-                    lRunnable = nextRunning(lRunnable);
 
-                    // san - Dec 9, 2018 1:02:39 PM : check if it is time to shutdown
-                    if(shutdown) tryShutdown();
-                }
+            // san - Dec 9, 2018 1:02:39 PM : check if it is time to shutdown
+            if(shutdown) tryShutdown();
         });
     }
 
@@ -216,7 +211,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     protected void tryRunning()
     {
         // san - Dec 12, 2018 9:25:07 PM : it is possible that all running tasks are done
-        if(isDone()) passToExecutor(nextRunning());
+        if(isDone()) passToExecutor(nextRunning(null));
     }
 
     @Override
