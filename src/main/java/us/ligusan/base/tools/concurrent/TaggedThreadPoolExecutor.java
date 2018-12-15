@@ -3,10 +3,11 @@ package us.ligusan.base.tools.concurrent;
 import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RunnableFuture;
 import java.util.concurrent.ThreadFactory;
@@ -25,27 +26,24 @@ import us.ligusan.base.tools.collections.FullBlockingQueue;
  */
 public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 {
-    private final int queueCapacity;
-
     private final ThreadPoolExecutor executor;
     private volatile Consumer<Runnable> rejectionHandler;
 
     // san - Dec 11, 2018 8:11:04 PM : use list in case we have the same runnable twice
     private final List<Runnable> runningTasks;
-    private final List<Runnable> submittedTasks;
+    private final BlockingQueue<Runnable> submittedTasks;
     private volatile boolean shutdown;
     
     public TaggedThreadPoolExecutor(final int pQueueCapacity, final int pMaxNumberOfThreads, final long pKeepAliveTime, final TimeUnit pTimeUnit, final ThreadFactory pThreadFactory)
     {
-        if((queueCapacity = pQueueCapacity) <= 0) throw new IllegalArgumentException();
-
         // san - Dec 9, 2018 4:01:52 PM : we maintain our own queue - no need to put extra
         executor = new ThreadPoolExecutor(1, pMaxNumberOfThreads, pKeepAliveTime, pTimeUnit, new FullBlockingQueue<>(), pThreadFactory);
         rejectionHandler = new Abort();
 
         runningTasks = new ArrayList<>();
-        // san - Dec 13, 2018 7:21:33 PM : will be removing a lot from 0 and middle - LinkedList would be better?
-        submittedTasks = new LinkedList<>();
+        // san - Dec 13, 2018 7:21:33 PM : will be removing a lot from 0 and middle - LinkedQueue?
+        // san - Dec 14, 2018 4:44:42 PM : with LinkedBlockingQueue there is not need for synchronization or capacity check
+        submittedTasks = new LinkedBlockingQueue<>(pQueueCapacity);
     }
 
     public Consumer<Runnable> getRejectionHandler()
@@ -60,30 +58,26 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     public String toString()
     {
         ToStringBuilder lToStringBuilder =
-            new ToStringBuilder(this).appendSuper(super.toString()).append("queueCapacity", queueCapacity).append("executor", executor).append("rejectionHandler", rejectionHandler);
+            new ToStringBuilder(this).appendSuper(super.toString()).append("executor", executor).append("rejectionHandler", rejectionHandler);
         synchronized(runningTasks)
         {
             lToStringBuilder.append("runningTasks", runningTasks);
         }
-        synchronized(submittedTasks)
-        {
-            lToStringBuilder.append("submittedTasks", submittedTasks);
-        }
+        return lToStringBuilder.append("submittedTasks", submittedTasks).append("shutdown", shutdown).toString();
+    }
 
-        return lToStringBuilder.append("shutdown", shutdown).toString();
+    protected boolean isDone()
+    {
+        synchronized(runningTasks)
+        {
+            return runningTasks.isEmpty();
+        }
     }
 
     protected void tryShutdown()
     {
-        boolean lShutdown = true;
-
-        synchronized(runningTasks)
-        {
-            lShutdown = runningTasks.isEmpty();
-        }
-
         // san - Dec 10, 2018 2:11:24 PM : nothing is running - shutdown executor
-        if(lShutdown) executor.shutdown();
+        if(isDone()) executor.shutdown();
     }
 
     @Override
@@ -99,12 +93,8 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     {
         shutdown = true;
 
-        ArrayList<Runnable> ret = null;
-        synchronized(submittedTasks)
-        {
-            ret = new ArrayList<>(submittedTasks);
-            submittedTasks.clear();
-        }
+        ArrayList<Runnable> ret = new ArrayList<>();
+        submittedTasks.drainTo(ret);
 
         executor.shutdownNow();
 
@@ -126,51 +116,70 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         return executor.awaitTermination(pTimeout, pUnit);
     }
 
+    protected boolean isFull()
+    {
+        synchronized(runningTasks)
+        {
+            return runningTasks.size() >= executor.getMaximumPoolSize();
+        }
+    }
+
     protected T getTag(final Object pTagged)
     {
         // san - Dec 9, 2018 9:37:58 PM : it does not really matter what T is - jvm will strip it out
         return pTagged instanceof Tagged ? (T)((Tagged)pTagged).getTag() : null;
     }
 
-    protected boolean addToRunning(final Runnable pRunnable)
+    /**
+     * @param pRunnableToStart
+     * @param pCurrentlyRunning null when adding new thread
+     * @return true if pool has open thread to run
+     */
+    protected boolean addToRunning(final Runnable pRunnableToStart, final Runnable pCurrentlyRunning)
     {
+        // san - Dec 14, 2018 5:00:10 PM : when replacing, new runnable will be in the same thread
+        // san - Dec 14, 2018 4:59:10 PM : no need to check size when replacing
+        if(pCurrentlyRunning == null && isFull()) return false;
+
+        T lTag = getTag(pRunnableToStart);
         synchronized(runningTasks)
         {
-            if(runningTasks.size() >= executor.getMaximumPoolSize()) return false;
-
-            T lTag = getTag(pRunnable);
             // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
             if(lTag != null) for(Runnable lRunnable : runningTasks)
-                if(lTag.equals(getTag(lRunnable))) return false;
+                // san - Dec 14, 2018 5:01:46 PM : currently running will be removed - no need to check
+                // san - Dec 14, 2018 10:37:35 PM : if we have the same runnable twice, they should have the same tag
+                if(!lRunnable.equals(pCurrentlyRunning) && lTag.equals(getTag(lRunnable))) return false;
 
-            return runningTasks.add(pRunnable);
+            // san - Dec 14, 2018 10:38:35 PM : adding Runnable to list of threads
+            return runningTasks.add(pRunnableToStart);
         }
     }
 
-    protected Runnable nextRunning(final Runnable pRunnable)
+    protected Runnable nextRunning(final Runnable pCurrentlyRunning)
     {
-        // san - Dec 13, 2018 7:25:50 PM : this method requires both locks
-        synchronized(runningTasks)
+        Runnable ret = null;
+
+        for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
         {
-            // san - Dec 13, 2018 7:19:04 PM : if pRunnable is not null, we execute in pooled thread - addToRunning should happen in the same lock
-            if(pRunnable != null) runningTasks.remove(pRunnable);
-
-            synchronized(submittedTasks)
+            Runnable lRunnable = lIterator.next();
+            // san - Dec 14, 2018 10:22:49 PM : trying to add new runnable
+            if(addToRunning(lRunnable, pCurrentlyRunning))
             {
-                for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
-                {
-                    Runnable ret = lIterator.next();
-                    if(addToRunning(ret))
-                    {
-                        lIterator.remove();
+                ret = lRunnable;
 
-                        return ret;
-                    }
-                }
+                lIterator.remove();
+
+                break;
             }
         }
 
-        return null;
+        // san - Dec 14, 2018 10:22:16 PM : remove currently running - it is going to end
+        if(pCurrentlyRunning != null) synchronized(runningTasks)
+        {
+            runningTasks.remove(pCurrentlyRunning);
+        }
+
+        return ret;
     }
 
     protected void passToExecutor(final Runnable pRunnable)
@@ -192,26 +201,10 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         });
     }
 
-    protected boolean enqueue(final Runnable pRunnable)
-    {
-        synchronized(submittedTasks)
-        {
-            return submittedTasks.size() < queueCapacity && submittedTasks.add(pRunnable);
-        }
-    }
-
-    protected boolean isDone()
-    {
-        synchronized(runningTasks)
-        {
-            return runningTasks.isEmpty();
-        }
-    }
-
     protected void tryRunning()
     {
-        // san - Dec 12, 2018 9:25:07 PM : it is possible that all running tasks are done
-        if(isDone()) passToExecutor(nextRunning(null));
+        // san - Dec 12, 2018 9:25:07 PM : it is possible that thread finished while we were queueing
+        passToExecutor(nextRunning(null));
     }
 
     @Override
@@ -222,9 +215,9 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         // san - Dec 8, 2018 8:01:07 PM : discard if shutting down
         if(!shutdown)
             // san - Dec 10, 2018 2:22:33 PM : execute
-            if(addToRunning(pCommand)) passToExecutor(pCommand);
+            if(addToRunning(pCommand, null)) passToExecutor(pCommand);
             // san - Dec 10, 2018 2:22:50 PM : or queue
-            else if(enqueue(pCommand)) tryRunning();
+            else if(submittedTasks.offer(pCommand)) tryRunning();
             // san - Dec 8, 2018 7:50:26 PM : special handling if queue is full
             else rejectionHandler.accept(pCommand);
     }
@@ -238,16 +231,6 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     protected <V> RunnableFuture<V> newTaskFor(final Callable<V> pCallable)
     {
         return new TaggedFutureTask<V, T>(pCallable, getTag(pCallable));
-    }
-
-    protected void discardOldest(final Runnable pRunnable)
-    {
-        synchronized(submittedTasks)
-        {
-            // san - Dec 9, 2018 3:04:01 PM : remove oldest
-            if(submittedTasks.size() >= queueCapacity) submittedTasks.remove(0);
-            submittedTasks.add(pRunnable);
-        }
     }
 
     public class Abort implements Consumer<Runnable>
@@ -271,7 +254,10 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         @Override
         public void accept(final Runnable pRunnable)
         {
-            discardOldest(pRunnable);
+            // san - Dec 14, 2018 4:56:25 PM : try to insert
+            // san - Dec 14, 2018 4:56:37 PM : no luck - remove first
+            while(!submittedTasks.offer(pRunnable))
+                submittedTasks.poll();
 
             tryRunning();
         }

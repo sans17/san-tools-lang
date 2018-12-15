@@ -28,7 +28,7 @@ public class TaggedThreadPoolExecutorTest
     //    {}
 
     @Test
-    final void testExecute1()
+    final void testExecuteDiscardOldest()
     {
         CopyOnWriteArrayList<Integer> lResultOfExecution = new CopyOnWriteArrayList<>();
 
@@ -46,7 +46,7 @@ public class TaggedThreadPoolExecutorTest
     }
 
     @Test
-    final void testExecute2()
+    final void testExecuteAbort()
     {
         CopyOnWriteArrayList<Integer> lResultOfExecution = new CopyOnWriteArrayList<>();
 
