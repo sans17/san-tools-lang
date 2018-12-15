@@ -18,9 +18,11 @@ import org.apache.commons.lang3.builder.ToStringBuilder;
 import us.ligusan.base.tools.collections.FullBlockingQueue;
 
 /**
- * Implementation of Striped Executor
- * https://www.javaspecialists.eu/archive/Issue206.html
- * with a single queue.
+ * Implementation of <a href="https://www.javaspecialists.eu/archive/Issue206.html">Striped Executor</a> with a single queue.<br>
+ * 
+ * It implements standard ExecutorService interface, maintains single queue, takes a maximum number of threads as a parameter, support different rejection policies (similar to standard
+ * {@link ThreadPoolExecutor}).
+ * Unlike {@link ThreadPoolExecutor} it starts new thread not when queue is full, but when new task is submitted.
  * 
  * @author Alexander Prishchepov
  */
@@ -36,8 +38,10 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     
     public TaggedThreadPoolExecutor(final int pQueueCapacity, final int pMaxNumberOfThreads, final long pKeepAliveTime, final TimeUnit pTimeUnit, final ThreadFactory pThreadFactory)
     {
-        // san - Dec 9, 2018 4:01:52 PM : we maintain our own queue - no need to put extra
+        // san - Dec 9, 2018 4:01:52 PM : we maintain our own queue - no need to for extra queueing
+        // san - Dec 14, 2018 11:07:05 PM : 1 core thread, since FullBlockingQueue always rejects, ThreadPoolExecutor will add threads up to max 
         executor = new ThreadPoolExecutor(1, pMaxNumberOfThreads, pKeepAliveTime, pTimeUnit, new FullBlockingQueue<>(), pThreadFactory);
+        // san - Dec 14, 2018 11:24:51 PM : default is to abort
         rejectionHandler = new Abort();
 
         runningTasks = new ArrayList<>();
@@ -52,6 +56,9 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     }
     public void setRejectionHandler(final Consumer<Runnable> pRejectionHandler)
     {
+        // san - Dec 14, 2018 11:28:18 PM : ThreadPoolExecutor throws NPE in this case
+        if(pRejectionHandler == null) throw new NullPointerException();
+
         rejectionHandler = pRejectionHandler;
     }
     @Override
@@ -131,9 +138,9 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     }
 
     /**
-     * @param pRunnableToStart
-     * @param pCurrentlyRunning null when adding new thread
-     * @return true if pool has open thread to run
+     * @param  pRunnableToStart  that need to be executed
+     * @param  pCurrentlyRunning null when adding new thread
+     * @return                   true if thread is available for this runnable
      */
     protected boolean addToRunning(final Runnable pRunnableToStart, final Runnable pCurrentlyRunning)
     {
