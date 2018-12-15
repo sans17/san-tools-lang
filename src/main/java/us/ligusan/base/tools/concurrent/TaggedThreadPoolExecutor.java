@@ -137,25 +137,17 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         return pTagged instanceof Tagged ? (T)((Tagged)pTagged).getTag() : null;
     }
 
-    /**
-     * @param  pRunnableToStart  that need to be executed
-     * @param  pCurrentlyRunning null when adding new thread
-     * @return                   true if thread is available for this runnable
-     */
-    protected boolean addToRunning(final Runnable pRunnableToStart, final Runnable pCurrentlyRunning)
+    protected boolean addToRunning(final Runnable pRunnableToStart)
     {
-        // san - Dec 14, 2018 5:00:10 PM : when replacing, new runnable will be in the same thread
-        // san - Dec 14, 2018 4:59:10 PM : no need to check size when replacing
-        if(pCurrentlyRunning == null && isFull()) return false;
+        if(isFull()) return false;
 
         T lTag = getTag(pRunnableToStart);
         synchronized(runningTasks)
         {
             // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
             if(lTag != null) for(Runnable lRunnable : runningTasks)
-                // san - Dec 14, 2018 5:01:46 PM : currently running will be removed - no need to check
                 // san - Dec 14, 2018 10:37:35 PM : if we have the same runnable twice, they should have the same tag
-                if(!lRunnable.equals(pCurrentlyRunning) && lTag.equals(getTag(lRunnable))) return false;
+                if(lTag.equals(getTag(lRunnable))) return false;
 
             // san - Dec 14, 2018 10:38:35 PM : adding Runnable to list of threads
             return runningTasks.add(pRunnableToStart);
@@ -164,29 +156,27 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
     protected Runnable nextRunning(final Runnable pCurrentlyRunning)
     {
-        Runnable ret = null;
-
-        for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
+        // san - Dec 15, 2018 11:46:35 AM : with simple synchronization we have to make sure that what we enter into running is the same that what we pull from queue
+        synchronized(runningTasks)
         {
-            Runnable lRunnable = lIterator.next();
-            // san - Dec 14, 2018 10:22:49 PM : trying to add new runnable
-            if(addToRunning(lRunnable, pCurrentlyRunning))
+            if(pCurrentlyRunning != null) runningTasks.remove(pCurrentlyRunning);
+
+            for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
             {
-                ret = lRunnable;
+                Runnable ret = lIterator.next();
+                // san - Dec 14, 2018 10:22:49 PM : trying to add new runnable
+                if(addToRunning(ret))
+                {
+                    lIterator.remove();
 
-                lIterator.remove();
-
-                break;
+                    return ret;
+                }
             }
+
+            // san - Dec 14, 2018 10:22:16 PM : remove currently running - it is already done
         }
 
-        // san - Dec 14, 2018 10:22:16 PM : remove currently running - it is going to end
-        if(pCurrentlyRunning != null) synchronized(runningTasks)
-        {
-            runningTasks.remove(pCurrentlyRunning);
-        }
-
-        return ret;
+        return null;
     }
 
     protected void passToExecutor(final Runnable pRunnable)
@@ -222,7 +212,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         // san - Dec 8, 2018 8:01:07 PM : discard if shutting down
         if(!shutdown)
             // san - Dec 10, 2018 2:22:33 PM : execute
-            if(addToRunning(pCommand, null)) passToExecutor(pCommand);
+            if(addToRunning(pCommand)) passToExecutor(pCommand);
             // san - Dec 10, 2018 2:22:50 PM : or queue
             else if(submittedTasks.offer(pCommand)) tryRunning();
             // san - Dec 8, 2018 7:50:26 PM : special handling if queue is full
