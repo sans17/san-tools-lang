@@ -4,9 +4,12 @@ import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RunnableFuture;
@@ -31,11 +34,11 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     private final ThreadPoolExecutor executor;
     private volatile Consumer<Runnable> rejectionHandler;
 
-    // san - Dec 11, 2018 8:11:04 PM : use list in case we have the same runnable twice
-    private final List<Runnable> runningTasks;
+    // san - Dec 11, 2018 8:11:04 PM : we can identify thread by number, in case we have the same runnable twice
+    private final Map<Integer, Runnable> runningTasks;
     private final BlockingQueue<Runnable> submittedTasks;
     private volatile boolean shutdown;
-    
+
     public TaggedThreadPoolExecutor(final int pQueueCapacity, final int pMaxNumberOfThreads, final long pKeepAliveTime, final TimeUnit pTimeUnit, final ThreadFactory pThreadFactory)
     {
         // san - Dec 9, 2018 4:01:52 PM : we maintain our own queue - no need to for extra queueing
@@ -44,7 +47,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         // san - Dec 14, 2018 11:24:51 PM : default is to abort
         rejectionHandler = new Abort();
 
-        runningTasks = new ArrayList<>();
+        runningTasks = new ConcurrentHashMap<>(pMaxNumberOfThreads);
         // san - Dec 13, 2018 7:21:33 PM : will be removing a lot from 0 and middle - LinkedQueue?
         // san - Dec 14, 2018 4:44:42 PM : with LinkedBlockingQueue there is not need for synchronization or capacity check
         submittedTasks = new LinkedBlockingQueue<>(pQueueCapacity);
@@ -65,26 +68,18 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     public String toString()
     {
         ToStringBuilder lToStringBuilder =
-            new ToStringBuilder(this).appendSuper(super.toString()).append("executor", executor).append("rejectionHandler", rejectionHandler);
-        synchronized(runningTasks)
+            new ToStringBuilder(this).appendSuper(super.toString()).append("executor", executor).append("rejectionHandler", rejectionHandler).append("runningTasks", runningTasks);
+        synchronized(submittedTasks)
         {
-            lToStringBuilder.append("runningTasks", runningTasks);
+            lToStringBuilder.append("submittedTasks", submittedTasks);
         }
-        return lToStringBuilder.append("submittedTasks", submittedTasks).append("shutdown", shutdown).toString();
-    }
-
-    protected boolean isDone()
-    {
-        synchronized(runningTasks)
-        {
-            return runningTasks.isEmpty();
-        }
+        return lToStringBuilder.append("shutdown", shutdown).toString();
     }
 
     protected void tryShutdown()
     {
         // san - Dec 10, 2018 2:11:24 PM : nothing is running - shutdown executor
-        if(isDone()) executor.shutdown();
+        if(runningTasks.isEmpty()) executor.shutdown();
     }
 
     @Override
@@ -95,13 +90,17 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
         tryShutdown();
     }
+
     @Override
     public List<Runnable> shutdownNow()
     {
         shutdown = true;
 
         ArrayList<Runnable> ret = new ArrayList<>();
-        submittedTasks.drainTo(ret);
+        synchronized(submittedTasks)
+        {
+            submittedTasks.drainTo(ret);
+        }
 
         executor.shutdownNow();
 
@@ -123,12 +122,14 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         return executor.awaitTermination(pTimeout, pUnit);
     }
 
-    protected boolean isFull()
+    protected int addToRunning(final Runnable pRunnableToStart)
     {
-        synchronized(runningTasks)
-        {
-            return runningTasks.size() >= executor.getMaximumPoolSize();
-        }
+        // san - Dec 15, 2018 2:51:07 PM : let's try to add our runnable first
+        for(int i = 1; i <= executor.getMaximumPoolSize(); i++)
+            if(runningTasks.putIfAbsent(i, pRunnableToStart) == null) return i;
+
+        // san - Dec 16, 2018 4:18:04 PM : no thread available
+        return 0;
     }
 
     protected T getTag(final Object pTagged)
@@ -137,53 +138,24 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         return pTagged instanceof Tagged ? (T)((Tagged)pTagged).getTag() : null;
     }
 
-    protected boolean addToRunning(final Runnable pRunnableToStart)
+    protected boolean isTagCollision(final int pThreadNumber)
     {
-        if(isFull()) return false;
-
-        T lTag = getTag(pRunnableToStart);
-        synchronized(runningTasks)
-        {
-            // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
-            if(lTag != null) for(Runnable lRunnable : runningTasks)
-                // san - Dec 14, 2018 10:37:35 PM : if we have the same runnable twice, they should have the same tag
-                if(lTag.equals(getTag(lRunnable))) return false;
-
-            // san - Dec 14, 2018 10:38:35 PM : adding Runnable to list of threads
-            return runningTasks.add(pRunnableToStart);
-        }
+        T lTag = getTag(runningTasks.get(pThreadNumber));
+        // san - Dec 10, 2018 2:33:47 PM : null tag processed at any time
+        if(lTag != null) for(Entry<Integer, Runnable> lEntry : runningTasks.entrySet())
+            // san - Dec 15, 2018 2:59:57 PM : found same tag
+            // san - Dec 15, 2018 9:21:53 PM : will need to remove
+            if(pThreadNumber != lEntry.getKey() && lTag.equals(getTag(lEntry.getValue()))) return true;
+        // san - Dec 16, 2018 4:25:36 PM : no tags collision
+        return false;
     }
 
-    protected Runnable nextRunning(final Runnable pCurrentlyRunning)
+    protected void passToExecutor(final int pThreadNumber)
     {
-        // san - Dec 15, 2018 11:46:35 AM : with simple synchronization we have to make sure that what we enter into running is the same that what we pull from queue
-        synchronized(runningTasks)
-        {
-            if(pCurrentlyRunning != null) runningTasks.remove(pCurrentlyRunning);
-
-            for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
-            {
-                Runnable ret = lIterator.next();
-                // san - Dec 14, 2018 10:22:49 PM : trying to add new runnable
-                if(addToRunning(ret))
-                {
-                    lIterator.remove();
-
-                    return ret;
-                }
-            }
-
-            // san - Dec 14, 2018 10:22:16 PM : remove currently running - it is already done
-        }
-
-        return null;
-    }
-
-    protected void passToExecutor(final Runnable pRunnable)
-    {
-        if(pRunnable != null) executor.execute(() -> {
+        executor.execute(() -> {
             // san - Dec 8, 2018 7:34:26 PM : will be running in the same thread
-            for(Runnable lRunnable = pRunnable; lRunnable != null; lRunnable = nextRunning(lRunnable))
+            for(Runnable lRunnable = null; (lRunnable = runningTasks.get(pThreadNumber)) != null;)
+            {
                 try
                 {
                     lRunnable.run();
@@ -193,6 +165,28 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
                     // san - Dec 11, 2018 7:10:00 PM : yep - I just swallowed a Throwable from a Runnable
                 }
 
+                boolean lTagCollision = false;
+
+                synchronized(submittedTasks)
+                {
+                    for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
+                    {
+                        runningTasks.put(pThreadNumber, lIterator.next());
+
+                        // san - Dec 14, 2018 10:22:49 PM : next runnable is ok to continue
+                        if(!(lTagCollision = isTagCollision(pThreadNumber)))
+                        {
+                            lIterator.remove();
+
+                            break;
+                        }
+                    }
+                }
+
+                // san - Dec 16, 2018 4:11:32 PM : next runnable is not ok to continue
+                if(lTagCollision) runningTasks.remove(pThreadNumber);
+            }
+
             // san - Dec 9, 2018 1:02:39 PM : check if it is time to shutdown
             if(shutdown) tryShutdown();
         });
@@ -200,8 +194,44 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
     protected void tryRunning()
     {
-        // san - Dec 12, 2018 9:25:07 PM : it is possible that thread finished while we were queueing
-        passToExecutor(nextRunning(null));
+        int lThreadNumber = 0;
+
+        synchronized(submittedTasks)
+        {
+            // san - Dec 12, 2018 9:25:07 PM : it is possible that thread finished while we were queueing
+            for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
+            {
+                Runnable lQueuedRunnable = lIterator.next();
+
+                // san - Dec 16, 2018 4:49:19 PM : already added - need to change Runnable
+                if(lThreadNumber > 0) runningTasks.put(lThreadNumber, lQueuedRunnable);
+                // san - Dec 16, 2018 4:41:42 PM : let's check if we can add anything in
+                else
+                // san - Dec 16, 2018 4:42:38 PM : could not add - no need to check the rest
+                if((lThreadNumber = addToRunning(lQueuedRunnable)) < 1) return;
+
+                // san - Dec 16, 2018 4:34:07 PM : we don't have tags collision
+                if(!isTagCollision(lThreadNumber))
+                {
+                    lIterator.remove();
+
+                    passToExecutor(lThreadNumber);
+
+                    return;
+                }
+            }
+        }
+
+        // san - Dec 16, 2018 4:46:44 PM : there was a tag collision - need to remove
+        runningTasks.remove(lThreadNumber);
+    }
+
+    protected boolean enqueue(final Runnable pRunnable)
+    {
+        synchronized(submittedTasks)
+        {
+            return submittedTasks.offer(pRunnable);
+        }
     }
 
     @Override
@@ -211,12 +241,28 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
         // san - Dec 8, 2018 8:01:07 PM : discard if shutting down
         if(!shutdown)
+        {
+            // san - Dec 15, 2018 8:58:41 PM : 1-based; 0 - not found
+            int lThreadNumber = 0;
+            do
+                // san - Dec 15, 2018 3:04:28 PM : there is an open thread
+                // san - Dec 16, 2018 4:26:57 PM : but we have tags collision
+                if((lThreadNumber = addToRunning(pCommand)) > 0 && isTagCollision(lThreadNumber))
+                {
+                    runningTasks.remove(lThreadNumber);
+
+                    lThreadNumber = 0;
+                }
+            // san - Dec 15, 2018 3:10:40 PM : something is removing threads while we adding - let's try again
+            while(lThreadNumber < 1 && runningTasks.isEmpty());
+
             // san - Dec 10, 2018 2:22:33 PM : execute
-            if(addToRunning(pCommand)) passToExecutor(pCommand);
+            if(lThreadNumber > 0) passToExecutor(lThreadNumber);
             // san - Dec 10, 2018 2:22:50 PM : or queue
-            else if(submittedTasks.offer(pCommand)) tryRunning();
+            else if(enqueue(pCommand)) tryRunning();
             // san - Dec 8, 2018 7:50:26 PM : special handling if queue is full
             else rejectionHandler.accept(pCommand);
+        }
     }
 
     @Override
@@ -252,9 +298,12 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         public void accept(final Runnable pRunnable)
         {
             // san - Dec 14, 2018 4:56:25 PM : try to insert
-            // san - Dec 14, 2018 4:56:37 PM : no luck - remove first
-            while(!submittedTasks.offer(pRunnable))
-                submittedTasks.poll();
+            while(!enqueue(pRunnable))
+                // san - Dec 14, 2018 4:56:37 PM : no luck - remove first
+                synchronized(submittedTasks)
+                {
+                    submittedTasks.poll();
+                }
 
             tryRunning();
         }

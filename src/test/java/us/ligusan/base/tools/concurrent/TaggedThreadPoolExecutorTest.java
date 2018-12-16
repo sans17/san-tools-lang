@@ -38,8 +38,15 @@ public class TaggedThreadPoolExecutorTest
         for(int i = 0; i < 5; i++)
         {
             int j = i;
-            lExecutorUnderTest.submit(new TaggedFutureTask<Object, Integer>(() -> lResultOfExecution.add(j), null, 1));
+            lExecutorUnderTest.submit(new TaggedFutureTask<Object, Integer>(() -> {
+                // san - Dec 13, 2018 9:10:12 PM : 2 seconds sleep
+                LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(2));
+                lResultOfExecution.add(j);
+            }, null, 1));
         }
+
+        // san - Dec 13, 2018 9:12:18 PM : 10 seconds sleep
+        LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(10));
 
         // san - Dec 13, 2018 8:48:05 PM : 0 goes into processing; 1, 2, 3, 4 into queue; 1, 2 are discarded 
         assertEquals(Arrays.asList(0, 3, 4), lResultOfExecution);
