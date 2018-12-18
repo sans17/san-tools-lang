@@ -189,7 +189,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
             for(int lThreadNumber = pThreadNumber; lThreadNumber > 0; lThreadNumber = dequeue(lThreadNumber))
                 try
                 {
-                    runningTasks.get(pThreadNumber).run();
+                    runningTasks.get(lThreadNumber).run();
                 }
                 catch(Throwable t)
                 {
