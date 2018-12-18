@@ -122,16 +122,6 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         return executor.awaitTermination(pTimeout, pUnit);
     }
 
-    protected int addToRunning(final Runnable pRunnableToStart)
-    {
-        // san - Dec 15, 2018 2:51:07 PM : let's try to add our runnable first
-        for(int i = 1; i <= executor.getMaximumPoolSize(); i++)
-            if(runningTasks.putIfAbsent(i, pRunnableToStart) == null) return i;
-
-        // san - Dec 16, 2018 4:18:04 PM : no thread available
-        return 0;
-    }
-
     protected T getTag(final Object pTagged)
     {
         // san - Dec 9, 2018 9:37:58 PM : it does not really matter what T is - jvm will strip it out
@@ -150,42 +140,61 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         return false;
     }
 
+    protected int addToRunning(final Runnable pRunnable)
+    {
+        // san - Dec 15, 2018 2:51:07 PM : let's try to add our runnable first
+        for(int i = 1; i <= executor.getMaximumPoolSize(); i++)
+            if(runningTasks.putIfAbsent(i, pRunnable) == null) return i;
+
+        // san - Dec 16, 2018 4:18:04 PM : no thread available
+        return 0;
+    }
+
+    protected int dequeue(final int pThreadNumber)
+    {
+        int ret = pThreadNumber;
+
+        synchronized(submittedTasks)
+        {
+            for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
+            {
+                Runnable lRunnable = lIterator.next();
+
+                // san - Dec 16, 2018 4:49:19 PM : already added - need to change Runnable
+                if(ret > 0) runningTasks.put(ret, lRunnable);
+                // san - Dec 16, 2018 4:41:42 PM : let's check if we can add anything in
+                else
+                // san - Dec 16, 2018 4:42:38 PM : could not add - no need to check the rest
+                if((ret = addToRunning(lRunnable)) < 1) return 0;
+
+                // san - Dec 14, 2018 10:22:49 PM : next runnable is ok to continue
+                if(!isTagCollision(ret))
+                {
+                    lIterator.remove();
+
+                    return ret;
+                }
+            }
+        }
+
+        // san - Dec 16, 2018 4:11:32 PM : there was a tag collision - need to remove
+        runningTasks.remove(ret);
+        return 0;
+    }
+
     protected void passToExecutor(final int pThreadNumber)
     {
         executor.execute(() -> {
             // san - Dec 8, 2018 7:34:26 PM : will be running in the same thread
-            for(Runnable lRunnable = null; (lRunnable = runningTasks.get(pThreadNumber)) != null;)
-            {
+            for(int lThreadNumber = pThreadNumber; lThreadNumber > 0; lThreadNumber = dequeue(lThreadNumber))
                 try
                 {
-                    lRunnable.run();
+                    runningTasks.get(pThreadNumber).run();
                 }
                 catch(Throwable t)
                 {
                     // san - Dec 11, 2018 7:10:00 PM : yep - I just swallowed a Throwable from a Runnable
                 }
-
-                boolean lTagCollision = false;
-
-                synchronized(submittedTasks)
-                {
-                    for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
-                    {
-                        runningTasks.put(pThreadNumber, lIterator.next());
-
-                        // san - Dec 14, 2018 10:22:49 PM : next runnable is ok to continue
-                        if(!(lTagCollision = isTagCollision(pThreadNumber)))
-                        {
-                            lIterator.remove();
-
-                            break;
-                        }
-                    }
-                }
-
-                // san - Dec 16, 2018 4:11:32 PM : next runnable is not ok to continue
-                if(lTagCollision) runningTasks.remove(pThreadNumber);
-            }
 
             // san - Dec 9, 2018 1:02:39 PM : check if it is time to shutdown
             if(shutdown) tryShutdown();
@@ -194,36 +203,8 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
     protected void tryRunning()
     {
-        int lThreadNumber = 0;
-
-        synchronized(submittedTasks)
-        {
-            // san - Dec 12, 2018 9:25:07 PM : it is possible that thread finished while we were queueing
-            for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
-            {
-                Runnable lQueuedRunnable = lIterator.next();
-
-                // san - Dec 16, 2018 4:49:19 PM : already added - need to change Runnable
-                if(lThreadNumber > 0) runningTasks.put(lThreadNumber, lQueuedRunnable);
-                // san - Dec 16, 2018 4:41:42 PM : let's check if we can add anything in
-                else
-                // san - Dec 16, 2018 4:42:38 PM : could not add - no need to check the rest
-                if((lThreadNumber = addToRunning(lQueuedRunnable)) < 1) return;
-
-                // san - Dec 16, 2018 4:34:07 PM : we don't have tags collision
-                if(!isTagCollision(lThreadNumber))
-                {
-                    lIterator.remove();
-
-                    passToExecutor(lThreadNumber);
-
-                    return;
-                }
-            }
-        }
-
-        // san - Dec 16, 2018 4:46:44 PM : there was a tag collision - need to remove
-        runningTasks.remove(lThreadNumber);
+        int lThreadNumber = dequeue(0);
+        if(lThreadNumber > 0) passToExecutor(lThreadNumber);
     }
 
     protected boolean enqueue(final Runnable pRunnable)

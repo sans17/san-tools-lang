@@ -30,59 +30,73 @@ public class TaggedThreadPoolExecutorTest
     @Test
     final void testExecuteDiscardOldest()
     {
-        CopyOnWriteArrayList<Integer> lResultOfExecution = new CopyOnWriteArrayList<>();
-
-        TaggedThreadPoolExecutor<Integer> lExecutorUnderTest = new TaggedThreadPoolExecutor<>(2, 2, 10, TimeUnit.SECONDS, Executors.defaultThreadFactory());
-        lExecutorUnderTest.setRejectionHandler(lExecutorUnderTest.new DiscardOldest());
-
-        for(int i = 0; i < 5; i++)
+        try
         {
-            int j = i;
-            lExecutorUnderTest.submit(new TaggedFutureTask<Object, Integer>(() -> {
-                // san - Dec 13, 2018 9:10:12 PM : 2 seconds sleep
-                LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(2));
-                lResultOfExecution.add(j);
-            }, null, 1));
+            CopyOnWriteArrayList<Integer> lResultOfExecution = new CopyOnWriteArrayList<>();
+
+            TaggedThreadPoolExecutor<Integer> lExecutorUnderTest = new TaggedThreadPoolExecutor<>(2, 2, 10, TimeUnit.SECONDS, Executors.defaultThreadFactory());
+            lExecutorUnderTest.setRejectionHandler(lExecutorUnderTest.new DiscardOldest());
+
+            for(int i = 0; i < 5; i++)
+            {
+                int j = i;
+                lExecutorUnderTest.submit(new TaggedFutureTask<Object, Integer>(() -> {
+                    // san - Dec 13, 2018 9:10:12 PM : 2 seconds sleep
+                    LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(2));
+                    lResultOfExecution.add(j);
+                }, null, 1));
+            }
+
+            // san - Dec 13, 2018 9:12:18 PM : 10 seconds sleep
+            LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(10));
+
+            // san - Dec 13, 2018 8:48:05 PM : 0 goes into processing; 1, 2, 3, 4 into queue; 1, 2 are discarded 
+            assertEquals(Arrays.asList(0, 3, 4), lResultOfExecution);
         }
-
-        // san - Dec 13, 2018 9:12:18 PM : 10 seconds sleep
-        LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(10));
-
-        // san - Dec 13, 2018 8:48:05 PM : 0 goes into processing; 1, 2, 3, 4 into queue; 1, 2 are discarded 
-        assertEquals(Arrays.asList(0, 3, 4), lResultOfExecution);
+        catch(Throwable t)
+        {
+            fail(t);
+        }
     }
 
     @Test
     final void testExecuteAbort()
     {
-        CopyOnWriteArrayList<Integer> lResultOfExecution = new CopyOnWriteArrayList<>();
-
-        TaggedThreadPoolExecutor<Integer> lExecutorUnderTest = new TaggedThreadPoolExecutor<>(2, 2, 10, TimeUnit.SECONDS, Executors.defaultThreadFactory());
-
-        for(int i = 0; i < 5; i++)
+        try
         {
-            int j = i;
-            Executable lExecutable = () -> lExecutorUnderTest.submit(new TaggedFutureTask<Object, Integer>(() -> {
-                // san - Dec 13, 2018 9:10:12 PM : 2 seconds sleep
-                LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(2));
-                lResultOfExecution.add(j);
-            }, null, 1));
+            CopyOnWriteArrayList<Integer> lResultOfExecution = new CopyOnWriteArrayList<>();
 
-            if(i > 2) assertThrows(RejectedExecutionException.class, lExecutable);
-            else try
+            TaggedThreadPoolExecutor<Integer> lExecutorUnderTest = new TaggedThreadPoolExecutor<>(2, 2, 10, TimeUnit.SECONDS, Executors.defaultThreadFactory());
+
+            for(int i = 0; i < 5; i++)
             {
-                lExecutable.execute();
+                int j = i;
+                Executable lExecutable = () -> lExecutorUnderTest.submit(new TaggedFutureTask<Object, Integer>(() -> {
+                    // san - Dec 13, 2018 9:10:12 PM : 2 seconds sleep
+                    LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(2));
+                    lResultOfExecution.add(j);
+                }, null, 1));
+
+                if(i > 2) assertThrows(RejectedExecutionException.class, lExecutable);
+                else try
+                {
+                    lExecutable.execute();
+                }
+                catch(Throwable t)
+                {
+                    fail(t);
+                }
             }
-            catch(Throwable t)
-            {
-                fail(t);
-            }
+
+            // san - Dec 13, 2018 9:12:18 PM : 10 seconds sleep
+            LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(10));
+
+            // san - Dec 13, 2018 8:48:05 PM : 0 goes into processing; 1, 2, 3, 4 into queue; 3, 4 aborted 
+            assertEquals(Arrays.asList(0, 1, 2), lResultOfExecution);
         }
-
-        // san - Dec 13, 2018 9:12:18 PM : 10 seconds sleep
-        LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(10));
-
-        // san - Dec 13, 2018 8:48:05 PM : 0 goes into processing; 1, 2, 3, 4 into queue; 3, 4 aborted 
-        assertEquals(Arrays.asList(0, 1, 2), lResultOfExecution);
+        catch(Throwable t)
+        {
+            fail(t);
+        }
     }
 }
