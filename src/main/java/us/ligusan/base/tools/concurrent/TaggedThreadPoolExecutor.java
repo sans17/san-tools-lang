@@ -6,13 +6,16 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.RunnableFuture;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -34,6 +37,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     private final ThreadPoolExecutor executor;
     private volatile Consumer<Runnable> rejectionHandler;
 
+    private final Semaphore executorSemaphore;
     // san - Dec 11, 2018 8:11:04 PM : we can identify thread by number, in case we have the same runnable twice
     private final Map<Integer, Runnable> runningTasks;
     private final BlockingQueue<Runnable> submittedTasks;
@@ -43,10 +47,22 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     {
         // san - Dec 9, 2018 4:01:52 PM : we maintain our own queue - no need to for extra queueing
         // san - Dec 14, 2018 11:07:05 PM : 1 core thread, since FullBlockingQueue always rejects, ThreadPoolExecutor will add threads up to max 
-        executor = new ThreadPoolExecutor(1, pMaxNumberOfThreads, pKeepAliveTime, pTimeUnit, new FullBlockingQueue<>(), pThreadFactory);
+        executor = new ThreadPoolExecutor(1, pMaxNumberOfThreads, pKeepAliveTime, pTimeUnit, new FullBlockingQueue<>(), pThreadFactory, new RejectedExecutionHandler()
+            {
+                @Override
+                public void rejectedExecution(final Runnable pRunnable, final ThreadPoolExecutor pExecutor)
+                {
+                    // san - Dec 19, 2018 8:51:03 PM : we add threads with very strict control - semaphore and map of runnables. The only way we can be rejected, if old therad has not exited yet. Let give it another chance with yield. 
+                    Thread.yield();
+
+                    // san - Dec 19, 2018 9:16:26 PM : yes, it is a recursive call, and we can get SOE exception, but I don't see any other way
+                    pExecutor.execute(pRunnable);
+                }
+            });
         // san - Dec 14, 2018 11:24:51 PM : default is to abort
         rejectionHandler = new Abort();
 
+        executorSemaphore = new Semaphore(pMaxNumberOfThreads);
         runningTasks = new ConcurrentHashMap<>(pMaxNumberOfThreads);
         // san - Dec 13, 2018 7:21:33 PM : will be removing a lot from 0 and middle - LinkedQueue?
         // san - Dec 14, 2018 4:44:42 PM : with LinkedBlockingQueue there is not need for synchronization or capacity check
@@ -67,8 +83,8 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     @Override
     public String toString()
     {
-        ToStringBuilder lToStringBuilder =
-            new ToStringBuilder(this).appendSuper(super.toString()).append("executor", executor).append("rejectionHandler", rejectionHandler).append("runningTasks", runningTasks);
+        ToStringBuilder lToStringBuilder = new ToStringBuilder(this).appendSuper(super.toString()).append("executor", executor).append("rejectionHandler", rejectionHandler)
+            .append("executorSemaphore", executorSemaphore).append("runningTasks", runningTasks);
         synchronized(submittedTasks)
         {
             lToStringBuilder.append("submittedTasks", submittedTasks);
@@ -90,7 +106,6 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
         tryShutdown();
     }
-
     @Override
     public List<Runnable> shutdownNow()
     {
@@ -154,6 +169,9 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
     {
         int ret = pThreadNumber;
 
+        // san - Dec 17, 2018 9:02:20 PM : it's ok if current tag is null
+        T lCurrentTag = getTag(runningTasks.get(ret));
+
         synchronized(submittedTasks)
         {
             for(Iterator<Runnable> lIterator = submittedTasks.iterator(); lIterator.hasNext();)
@@ -167,8 +185,9 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
                 // san - Dec 16, 2018 4:42:38 PM : could not add - no need to check the rest
                 if((ret = addToRunning(lRunnable)) < 1) return 0;
 
+                // san - Dec 17, 2018 8:59:55 PM : if we have the same tag or there is no tag collision
                 // san - Dec 14, 2018 10:22:49 PM : next runnable is ok to continue
-                if(!isTagCollision(ret))
+                if(Objects.equals(lCurrentTag, getTag(lRunnable)) || !isTagCollision(ret))
                 {
                     lIterator.remove();
 
@@ -182,29 +201,60 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         return 0;
     }
 
+    protected boolean isQueueEmpty()
+    {
+        synchronized(submittedTasks)
+        {
+            return submittedTasks.isEmpty();
+        }
+    }
+
     protected void passToExecutor(final int pThreadNumber)
     {
         executor.execute(() -> {
-            // san - Dec 8, 2018 7:34:26 PM : will be running in the same thread
-            for(int lThreadNumber = pThreadNumber; lThreadNumber > 0; lThreadNumber = dequeue(lThreadNumber))
-                try
-                {
-                    runningTasks.get(lThreadNumber).run();
-                }
-                catch(Throwable t)
-                {
-                    // san - Dec 11, 2018 7:10:00 PM : yep - I just swallowed a Throwable from a Runnable
-                }
+            int lThreadNumber = pThreadNumber;
+            boolean lInterrupted = false;
+            do
+            {
+                // san - Dec 17, 2018 9:35:50 PM : this can happen on retry
+                if(lThreadNumber < 1) lThreadNumber = dequeue(0);
+
+                // san - Dec 19, 2018 9:01:41 PM : check if we are interrupted, clearing flag
+                // san - Dec 8, 2018 7:34:26 PM : will be running in the same thread
+                for(; !(lInterrupted = Thread.interrupted()) && lThreadNumber > 0; lThreadNumber = dequeue(lThreadNumber))
+                    try
+                    {
+                        runningTasks.get(lThreadNumber).run();
+                    }
+                    catch(Throwable t)
+                    {
+                        // san - Dec 11, 2018 7:10:00 PM : yep - I just swallowed a Throwable from a Runnable
+                    }
+            }
+            // san - Dec 15, 2018 3:10:40 PM : unintentional tags collision, let's try again
+            while(!lInterrupted && runningTasks.isEmpty() && !isQueueEmpty());
+
+            // san - Dec 19, 2018 9:13:10 PM : just in case we were interrupted
+            runningTasks.remove(lThreadNumber);
 
             // san - Dec 9, 2018 1:02:39 PM : check if it is time to shutdown
             if(shutdown) tryShutdown();
+
+            // san - Dec 19, 2018 8:40:38 PM : this thread is done
+            executorSemaphore.release();
         });
     }
 
     protected void tryRunning()
     {
-        int lThreadNumber = dequeue(0);
-        if(lThreadNumber > 0) passToExecutor(lThreadNumber);
+        // san - Dec 19, 2018 8:46:53 PM : adding new thread
+        if(executorSemaphore.tryAcquire())
+        {
+            int lThreadNumber = dequeue(0);
+            if(lThreadNumber > 0) passToExecutor(lThreadNumber);
+            // san - Dec 19, 2018 8:47:02 PM : did not work - removing
+            else executorSemaphore.release();
+        }
     }
 
     protected boolean enqueue(final Runnable pRunnable)
@@ -226,13 +276,17 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
             // san - Dec 15, 2018 8:58:41 PM : 1-based; 0 - not found
             int lThreadNumber = 0;
             do
+                // san - Dec 19, 2018 8:39:57 PM : let's try to add a thread
                 // san - Dec 15, 2018 3:04:28 PM : there is an open thread
                 // san - Dec 16, 2018 4:26:57 PM : but we have tags collision
-                if((lThreadNumber = addToRunning(pCommand)) > 0 && isTagCollision(lThreadNumber))
+                if(executorSemaphore.tryAcquire() && (lThreadNumber = addToRunning(pCommand)) > 0 && isTagCollision(lThreadNumber))
                 {
                     runningTasks.remove(lThreadNumber);
 
                     lThreadNumber = 0;
+
+                    // san - Dec 19, 2018 8:41:52 PM : was not able to ass to running tasks
+                    executorSemaphore.release();
                 }
             // san - Dec 15, 2018 3:10:40 PM : something is removing threads while we adding - let's try again
             while(lThreadNumber < 1 && runningTasks.isEmpty());
