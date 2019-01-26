@@ -60,13 +60,54 @@ public class TaggedThreadPoolExecutorTest
     }
 
     @Test
-    final void testExecuteAbort()
+    final void testExecuteAbort2ThreadsInPool()
     {
         try
         {
             CopyOnWriteArrayList<Integer> lResultOfExecution = new CopyOnWriteArrayList<>();
 
             TaggedThreadPoolExecutor<Integer> lExecutorUnderTest = new TaggedThreadPoolExecutor<>(2, 2, 10, TimeUnit.SECONDS, Executors.defaultThreadFactory());
+
+            for(int i = 0; i < 5; i++)
+            {
+                int j = i;
+                Executable lExecutable = () -> lExecutorUnderTest.submit(new TaggedFutureTask<Object, Integer>(() -> {
+                    // san - Dec 13, 2018 9:10:12 PM : 2 seconds sleep
+                    LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(2));
+                    lResultOfExecution.add(j);
+                }, null, 1));
+
+                if(i > 2) assertThrows(RejectedExecutionException.class, lExecutable);
+                else try
+                {
+                    lExecutable.execute();
+                }
+                catch(Throwable t)
+                {
+                    fail(t);
+                }
+            }
+
+            // san - Dec 13, 2018 9:12:18 PM : 10 seconds sleep
+            LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(10));
+
+            // san - Dec 13, 2018 8:48:05 PM : 0 goes into processing; 1, 2, 3, 4 into queue; 3, 4 aborted 
+            assertEquals(Arrays.asList(0, 1, 2), lResultOfExecution);
+        }
+        catch(Throwable t)
+        {
+            fail(t);
+        }
+    }
+
+    @Test
+    final void testExecuteAbort1ThreadInPool()
+    {
+        try
+        {
+            CopyOnWriteArrayList<Integer> lResultOfExecution = new CopyOnWriteArrayList<>();
+
+            TaggedThreadPoolExecutor<Integer> lExecutorUnderTest = new TaggedThreadPoolExecutor<>(2, 1, 0, TimeUnit.SECONDS, Executors.defaultThreadFactory());
 
             for(int i = 0; i < 5; i++)
             {

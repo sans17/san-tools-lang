@@ -52,10 +52,10 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
                 @Override
                 public void rejectedExecution(final Runnable pRunnable, final ThreadPoolExecutor pExecutor)
                 {
-                    // san - Dec 19, 2018 8:51:03 PM : we add threads with very strict control - semaphore and map of runnables. The only way we can be rejected, if old therad has not exited yet. Let give it another chance with yield. 
+                    // san - Dec 19, 2018 8:51:03 PM : we add threads with very strict control - semaphore and map of runnables. The only way we can be rejected, if old thread has not exited yet. Let give it another chance with yield. 
                     Thread.yield();
 
-                    // san - Dec 19, 2018 9:16:26 PM : yes, it is a recursive call, and we can get SOE exception, but I don't see any other way
+                    // san - Dec 19, 2018 9:16:26 PM : yes, it is a recursive call, and we can get SOE, but I don't see any other way
                     pExecutor.execute(pRunnable);
                 }
             });
@@ -211,7 +211,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
     protected void passToExecutor(final int pThreadNumber)
     {
-        executor.execute(() -> {
+        Runnable lRunnable = () -> {
             int lThreadNumber = pThreadNumber;
             boolean lInterrupted = false;
             do
@@ -242,7 +242,22 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
             // san - Dec 19, 2018 8:40:38 PM : this thread is done
             executorSemaphore.release();
-        });
+        };
+
+        for(boolean lAdded = false; !lAdded;)
+            // san - Jan 26, 2019 3:12:44 PM : if worker ended processing, let's just add another task
+            if(lAdded = executor.getPoolSize() < executor.getMaximumPoolSize()) executor.execute(lRunnable);
+            // san - Jan 26, 2019 3:14:47 PM : otherwise let's wait in queue - 10 millis?
+            else try
+            {
+                // san - Jan 26, 2019 3:32:47 PM : waited offer, so that FullBlockingQueue will wait
+                lAdded = executor.getQueue().offer(lRunnable, 10, TimeUnit.MILLISECONDS);
+            }
+            catch(InterruptedException e)
+            {
+                // san - Jan 26, 2019 3:31:24 PM : interrupted? who cares
+                Thread.interrupted();
+            }
     }
 
     protected void tryRunning()
@@ -285,7 +300,7 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
 
                     lThreadNumber = 0;
 
-                    // san - Dec 19, 2018 8:41:52 PM : was not able to ass to running tasks
+                    // san - Dec 19, 2018 8:41:52 PM : was not able to add to running tasks
                     executorSemaphore.release();
                 }
             // san - Dec 15, 2018 3:10:40 PM : something is removing threads while we adding - let's try again
