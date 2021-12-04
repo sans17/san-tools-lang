@@ -20,8 +20,8 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
-import org.apache.commons.lang3.builder.ToStringBuilder;
 import us.ligusan.base.tools.collections.FullBlockingQueue;
+import us.ligusan.base.tools.lang.Tagged;
 
 /**
  * Implementation of <a href="https://www.javaspecialists.eu/archive/Issue206.html">Striped Executor</a> with a single queue.<br>
@@ -79,17 +79,6 @@ public class TaggedThreadPoolExecutor<T> extends AbstractExecutorService
         if(pRejectionHandler == null) throw new NullPointerException();
 
         rejectionHandler = pRejectionHandler;
-    }
-    @Override
-    public String toString()
-    {
-        ToStringBuilder lToStringBuilder = new ToStringBuilder(this).appendSuper(super.toString()).append("executor", executor).append("rejectionHandler", rejectionHandler)
-            .append("executorSemaphore", executorSemaphore).append("runningTasks", runningTasks);
-        synchronized(submittedTasks)
-        {
-            lToStringBuilder.append("submittedTasks", submittedTasks);
-        }
-        return lToStringBuilder.append("shutdown", shutdown).toString();
     }
 
     protected void tryShutdown()

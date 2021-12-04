@@ -1,4 +1,4 @@
-package us.ligusan.base.tools.concurrent;
+package us.ligusan.base.tools.lang;
 
 /**
  * Simple tagging interface.

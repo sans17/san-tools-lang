@@ -2,7 +2,7 @@ package us.ligusan.base.tools.concurrent;
 
 import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
-import org.apache.commons.lang3.builder.ToStringBuilder;
+import us.ligusan.base.tools.lang.Tagged;
 
 /**
  * Tagged {@link Runnable} implementation.
@@ -30,10 +30,5 @@ public class TaggedFutureTask<V, T> extends FutureTask<V> implements Tagged<T>
     public T getTag()
     {
         return tag;
-    }
-    @Override
-    public String toString()
-    {
-        return new ToStringBuilder(this).appendSuper(super.toString()).append("tag", tag).toString();
     }
 }

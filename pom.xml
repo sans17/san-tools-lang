@@ -5,17 +5,17 @@
 	<groupId>us.ligusan</groupId>
 	<artifactId>san-tools-lang</artifactId>
 
-	<version>0.0.11</version>
+	<version>0.10.0</version>
 
 	<properties>
-		<build.java.version>1.8</build.java.version>
+		<build.java.version>16</build.java.version>
 	</properties>
 
 	<dependencies>
 		<dependency>
 			<groupId>us.ligusan</groupId>
 			<artifactId>san-tools-collections</artifactId>
-			<version>0.0.3</version>
+			<version>0.10.0</version>
 		</dependency>
 
 		<dependency>
